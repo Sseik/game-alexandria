@@ -4,3 +4,8 @@ out
 .DS_Store
 .eslintcache
 *.log*
+.env
+
+/src/generated/prisma
+
+/src/generated/prisma

@@ -19,6 +19,10 @@ body {
   grid-template-columns: 1fr 4fr;
 }
 
+img {
+  max-width: 100%;
+}
+
 header {
   grid-area: header;
   width: 100%;

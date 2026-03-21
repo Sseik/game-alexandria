@@ -23,17 +23,22 @@
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
-    "electron-updater": "^6.3.9"
+    "@prisma/adapter-pg": "^7.5.0",
+    "@prisma/client": "^7.5.0",
+    "bcrypt": "^6.0.0",
+    "electron-updater": "^6.3.9",
+    "pg": "^8.20.0"
   },
   "devDependencies": {
     "@electron-toolkit/eslint-config-prettier": "^3.0.0",
     "@electron-toolkit/eslint-config-ts": "^3.1.0",
     "@electron-toolkit/tsconfig": "^2.0.0",
     "@eslint/js": "^9.7.0",
-    "@types/node": "^22.19.1",
+    "@types/node": "^22.19.15",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "dotenv": "^17.3.1",
     "electron": "^39.2.6",
     "electron-builder": "^26.0.12",
     "electron-vite": "^5.0.0",
@@ -41,10 +46,15 @@
     "eslint-plugin-react": "^7.37.5",
     "globals": "^17.4.0",
     "prettier": "^3.8.1",
+    "prisma": "^7.5.0",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.1",
     "vite": "^7.2.6"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   }
 }

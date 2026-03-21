@@ -1,0 +1,111 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           Int           @id @default(autoincrement())
+  username     String        @unique @db.VarChar(50)
+  email        String        @unique @db.VarChar(255)
+  passwordHash String        @db.VarChar(255) @map("password_hash")
+  roleId       Int           @map("role_id")
+  createdAt    DateTime?     @default(now()) @db.Timestamp(6) @map("created_at")
+  role         Role          @relation(fields: [roleId], references: [id], onUpdate: NoAction)
+  gameSessions GameSession[]
+  userLibraries UserLibrary[]
+  wishlists    Wishlist[]
+
+  @@map("app_user")
+}
+
+model Game {
+  id            Int            @id @default(autoincrement())
+  title         String         @db.VarChar(255)
+  description   String?
+  coverUrl      String?        @db.VarChar(500) @map("cover_url")
+  igdbId        Int?           @unique @map("igdb_id")
+  gameSessions  GameSession[]
+  priceHistory  PriceHistory[]
+  userLibraries UserLibrary[]
+  wishlists     Wishlist[]
+
+  @@map("game")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model GameSession {
+  id              Int       @id @default(autoincrement())
+  appUserId       Int       @map("app_user_id")
+  gameId          Int       @map("game_id")
+  startedAt       DateTime  @db.Timestamp(6) @map("started_at")
+  endedAt         DateTime? @db.Timestamp(6) @map("ended_at")
+  durationMinutes Int?      @map("duration_minutes")
+  appUser         User      @relation(fields: [appUserId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  game            Game      @relation(fields: [gameId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("game_session")
+}
+
+model Platform {
+  id            Int            @id @default(autoincrement())
+  name          String         @unique @db.VarChar(50)
+  launchPrefix  String?        @db.VarChar(255) @map("launch_prefix")
+  priceHistory  PriceHistory[]
+  userLibraries UserLibrary[]
+
+  @@map("platform")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model PriceHistory {
+  id         Int       @id @default(autoincrement())
+  gameId     Int       @map("game_id")
+  platformId Int       @map("platform_id")
+  price      Decimal   @db.Decimal(10, 2)
+  recordedAt DateTime? @default(now()) @db.Timestamp(6) @map("recorded_at")
+  game       Game      @relation(fields: [gameId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  platform   Platform  @relation(fields: [platformId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("price_history")
+}
+
+model Role {
+  id              Int     @id @default(autoincrement())
+  name            String  @unique @db.VarChar(50)
+  canRemoteLaunch Boolean? @default(false) @map("can_remote_launch")
+  users           User[]
+
+  @@map("role")
+}
+
+model UserLibrary {
+  id             Int       @id @default(autoincrement())
+  appUserId      Int       @map("app_user_id")
+  gameId         Int       @map("game_id")
+  platformId     Int       @map("platform_id")
+  executablePath String?   @db.VarChar(500) @map("executable_path")
+  addedAt        DateTime? @default(now()) @db.Timestamp(6) @map("added_at")
+  appUser        User      @relation(fields: [appUserId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  game           Game      @relation(fields: [gameId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  platform       Platform  @relation(fields: [platformId], references: [id], onUpdate: NoAction)
+
+  @@unique([appUserId, gameId, platformId])
+  @@map("user_library")
+}
+
+model Wishlist {
+  id          Int       @id @default(autoincrement())
+  appUserId   Int       @map("app_user_id")
+  gameId      Int       @map("game_id")
+  targetPrice Decimal?  @db.Decimal(10, 2) @map("target_price")
+  addedAt     DateTime? @default(now()) @db.Timestamp(6) @map("added_at")
+  appUser     User      @relation(fields: [appUserId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  game        Game      @relation(fields: [gameId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([appUserId, gameId])
+  @@map("wishlist")
+}
