@@ -6,8 +6,9 @@ function Main() {
   return (
     <main>
       <Routes>
+        <Route path="/" element={<Library />} />
         <Route path="/library" element={<Library />} />
-        <Route path="/" element={<Login />} />
+        <Route path="/login" element={<Login />} />
       </Routes>
     </main>
   );

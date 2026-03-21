@@ -30,16 +30,16 @@ header {
   grid-template-areas: 'logo name . avatar username';
   grid-template-columns: auto auto 1fr auto auto;
   align-items: center;
-  padding: 8px;
+  padding: 16px;
   background-color: var(--ev-c-black);
   box-shadow: 0 8px 8px solid black;
+  gap: 16px;
   h1 {
     grid-area: name;
   }
   img {
     height: 3rem;
     width: auto;
-    margin: 8px;
   }
   img.logo {
     grid-area: logo;
@@ -47,10 +47,16 @@ header {
   img.avatar {
     grid-area: avatar;
   }
+  a:first-of-type {
+    grid-area: avatar;
+  }
+  a:last-of-type {
+    grid-area: username;
+  }
+
   span.username {
     grid-area: username;
     font-size: 1.5rem;
-    margin: auto 16px;
   }
 }
 

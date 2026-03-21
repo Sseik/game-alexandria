@@ -9,7 +9,21 @@ export interface Game {
 
 export interface Credentials {
   success: boolean;
-  user?: string;
-  error?: string;
-  
+  user?: User;
+  error?: string; 
+}
+
+export interface Role {
+  id: number;
+  name: string;
+  canRemoteLaunch?: boolean;
+}
+
+export interface User {
+  id: number;
+  username: string;
+  email: string;
+  roleId: number;
+  createdAt?: string; 
+  role?: Role; 
 }

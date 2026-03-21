@@ -1,7 +1,9 @@
+import { useAuth } from '@renderer/context/AuthContext';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 function Login(): React.JSX.Element {
+  const { login } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -15,9 +17,10 @@ function Login(): React.JSX.Element {
     const result = await window.api.login({ email, password });
 
     if (result.success) {
+      login(result.user!);
       navigate('/library');
     } else {
-      setError(result.error || 'Error');
+      setError(result.error!);
     }
   };
 
