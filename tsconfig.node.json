@@ -4,6 +4,7 @@
     "electron.vite.config.*",
     "src/main/**/*",
     "src/preload/**/*",
+    "src/shared/**/*",
     "prisma.config.ts",
     "prisma/**/*.ts",
     "src/generated/prisma/**/*"
