@@ -1,4 +1,5 @@
 import GameCard from './GameCard';
+import { Game } from 'src/shared/types';
 
 interface GamesGridProps {
   games: Game[];

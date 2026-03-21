@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import GamesGrid from './GamesGrid';
+import { Game } from '../../../shared/types';
 
 function Library() {
   const [games, setGames] = useState<Game[]>([]);
@@ -14,7 +15,7 @@ function Library() {
   console.log(games);
 
   return (
-    <>
+    <section className='library'>
       <h2>Library</h2>
       <label htmlFor="sorting-options">Sort: </label>
       <select name="sorting-options" id="sorting-options">
@@ -25,7 +26,7 @@ function Library() {
         <option value="name">In-Game Time</option>
       </select>
       <GamesGrid games={games} />
-    </>
+    </section>
   );
 }
 

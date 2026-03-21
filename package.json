@@ -27,7 +27,8 @@
     "@prisma/client": "^7.5.0",
     "bcrypt": "^6.0.0",
     "electron-updater": "^6.3.9",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "react-router-dom": "^7.13.1"
   },
   "devDependencies": {
     "@electron-toolkit/eslint-config-prettier": "^3.0.0",

@@ -1,3 +1,5 @@
+import { Game } from 'src/shared/types';
+
 interface GameCardProps {
   game: Game;
 }

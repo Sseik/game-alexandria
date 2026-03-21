@@ -8,6 +8,8 @@ export interface Game {
 }
 
 export interface Credentials {
-  password: string;
-  email: string;
+  success: boolean;
+  user?: string;
+  error?: string;
+  
 }
