@@ -88,3 +88,9 @@ a {
   text-decoration: none;
   color: var(--color-text);
 }
+
+.options {
+  position: absolute;
+  right: 24px;
+  top: 64px;
+}
