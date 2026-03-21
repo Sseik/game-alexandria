@@ -1,6 +1,18 @@
-import GamesGrid from "./GamesGrid";
+import { useState, useEffect } from 'react';
+import GamesGrid from './GamesGrid';
 
 function Library() {
+  const [games, setGames] = useState<Game[]>([]);
+  useEffect(() => {
+    const loadGames = async () => {
+      const fetchedGames = await window.api.getGames();
+      setGames(fetchedGames);
+    };
+    loadGames();
+  }, []);
+
+  console.log(games);
+
   return (
     <>
       <h2>Library</h2>
@@ -12,7 +24,7 @@ function Library() {
         <option value="name">By Name (Z-A)</option>
         <option value="name">In-Game Time</option>
       </select>
-      <GamesGrid />
+      <GamesGrid games={games} />
     </>
   );
 }

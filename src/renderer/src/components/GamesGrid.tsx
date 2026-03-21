@@ -1,26 +1,17 @@
-import ElectronSVG from "../assets/electron.svg";
-import GameCard from "./GameCard";
+import GameCard from './GameCard';
 
-let games: Game[] = [
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-    {coverImage: ElectronSVG, title: "Game", platform: "Steam"},
-]
+interface GamesGridProps {
+  games: Game[];
+}
 
-function GamesGrid() {
-  return <section className="games">
-    {games.map(game => <GameCard game={game} />)}
-  </section>;
+function GamesGrid(props: GamesGridProps) {
+  return (
+    <section className="games">
+      {props.games.map((game) => (
+        <GameCard game={game} key={game.id}/>
+      ))}
+    </section>
+  );
 }
 
 export default GamesGrid;
