@@ -9,6 +9,12 @@ const prisma = new PrismaClient({ adapter });
 async function main() {
   console.log('⏳ Починаємо генерацію ігор...');
 
+  const steam = await prisma.platform.upsert({
+    where: { name: 'Steam' },
+    update: {},
+    create: { name: 'Steam', launchPrefix: 'steam://' }
+  });
+
   const gamesData = [
     {
       title: 'The Witcher 3: Wild Hunt',
@@ -43,13 +49,13 @@ async function main() {
     where: { name: 'Admin' },
     update: {},
     create: {
-      id: 1, // Явно вказуємо ID, на який посилатиметься юзер
+      id: 1,
       name: 'Admin',
       canRemoteLaunch: true
     }
   });
 
-  await prisma.role.upsert({
+  const userRole = await prisma.role.upsert({
     where: { name: 'User' },
     update: {},
     create: {
@@ -71,6 +77,28 @@ async function main() {
       roleId: adminRole.id
     }
   });
+
+  for (let i = 0; i < 2; i++) {
+    const hashedUserPassword = await bcrypt.hash(`user${i}password`, 10);
+    await prisma.user.upsert({
+      where: {
+        email: `user${i}@example.com`
+      },
+      update: {},
+      create: {
+        username: `user${i}`,
+        email: `user${i}@example.com`,
+        passwordHash: hashedUserPassword,
+        roleId: userRole.id,
+        userLibraries: {
+          create: {
+            gameId: i + 1,
+            platformId: steam.id
+          }
+        }
+      }
+    });
+  }
 }
 
 main()

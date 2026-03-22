@@ -5,7 +5,8 @@ import { Credentials } from '../shared/types';
 // Custom APIs for renderer
 const api = {
   getGames: () => ipcRenderer.invoke('get-games'),
-  login: (credentials: Credentials) => ipcRenderer.invoke('auth:login', credentials)
+  login: (credentials: Credentials) => ipcRenderer.invoke('auth:login', credentials),
+  getLibrary: (userId: number) => ipcRenderer.invoke('get-library', userId)
 };
 
 // Use `contextBridge` APIs to expose Electron APIs to

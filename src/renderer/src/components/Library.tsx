@@ -1,21 +1,25 @@
 import { useState, useEffect } from 'react';
 import GamesGrid from './GamesGrid';
 import { Game } from '../../../shared/types';
+import { useAuth } from '@renderer/context/AuthContext';
+import { useNavigate } from 'react-router-dom';
 
 function Library() {
+  const navigate = useNavigate();
+  const { user } = useAuth();
   const [games, setGames] = useState<Game[]>([]);
   useEffect(() => {
-    const loadGames = async () => {
-      const fetchedGames = await window.api.getGames();
+    const loadGames = async (userId: number) => {
+      const fetchedGames = await window.api.getLibrary(userId);
       setGames(fetchedGames);
     };
-    loadGames();
+    user ? loadGames(user.id) : navigate('/login');
   }, []);
 
   console.log(games);
 
   return (
-    <section className='library'>
+    <section className="library">
       <h2>Library</h2>
       <label htmlFor="sorting-options">Sort: </label>
       <select name="sorting-options" id="sorting-options">

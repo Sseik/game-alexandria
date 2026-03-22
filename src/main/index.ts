@@ -91,6 +91,37 @@ app.whenReady().then(() => {
       return { success: false, error: 'Database error' };
     }
   });
+
+  ipcMain.handle('get-library', async (_, userId: number) => {
+    const games = await prisma.userLibrary.findMany({
+      select: {
+        id: true,
+        executablePath: true,
+        platform: {
+          select: {
+            id: true
+          }
+        },
+        game: {
+          select: {
+            coverUrl: true,
+            title: true
+          }
+        }
+      },
+      where: {
+        appUserId: userId
+      }
+    });
+    return games.map((item) => {
+      const {
+        platform: { id: platformId },
+        game: {title, coverUrl},
+        executablePath
+      } = item;
+      return { title, coverUrl, executablePath, platformId };
+    });
+  });
 });
 
 // Quit when all windows are closed, except on macOS. There, it's common

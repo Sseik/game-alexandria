@@ -3,7 +3,7 @@ export interface Game {
   coverUrl: string;
   title: string;
   description?: string;
-  platform: string;
+  platformId: string;
   path?: string;
 }
 
