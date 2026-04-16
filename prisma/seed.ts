@@ -51,7 +51,6 @@ async function main() {
     create: {
       id: 1,
       name: 'Admin',
-      canRemoteLaunch: true
     }
   });
 
@@ -61,7 +60,6 @@ async function main() {
     create: {
       id: 2,
       name: 'User',
-      canRemoteLaunch: false
     }
   });
 

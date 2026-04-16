@@ -8,16 +8,17 @@ datasource db {
 }
 
 model User {
-  id           Int           @id @default(autoincrement())
-  username     String        @unique @db.VarChar(50)
-  email        String        @unique @db.VarChar(255)
-  passwordHash String        @db.VarChar(255) @map("password_hash")
-  roleId       Int           @map("role_id")
-  createdAt    DateTime?     @default(now()) @db.Timestamp(6) @map("created_at")
-  role         Role          @relation(fields: [roleId], references: [id], onUpdate: NoAction)
-  gameSessions GameSession[]
+  id            Int           @id @default(autoincrement())
+  username      String        @unique @db.VarChar(50)
+  email         String        @unique @db.VarChar(255)
+  passwordHash  String        @map("password_hash") @db.VarChar(255)
+  roleId        Int           @map("role_id")
+  createdAt     DateTime?     @default(now()) @map("created_at") @db.Timestamp(6)
+  role          Role          @relation(fields: [roleId], references: [id], onUpdate: NoAction)
+  gameSessions  GameSession[]
   userLibraries UserLibrary[]
-  wishlists    Wishlist[]
+  wishlists     Wishlist[]
+  addedGames    Game[]        @relation("UserAddedGames")
 
   @@map("app_user")
 }
@@ -26,8 +27,11 @@ model Game {
   id            Int            @id @default(autoincrement())
   title         String         @db.VarChar(255)
   description   String?
-  coverUrl      String?        @db.VarChar(500) @map("cover_url")
+  coverUrl      String?        @map("cover_url") @db.VarChar(500)
   igdbId        Int?           @unique @map("igdb_id")
+  isCustom      Boolean        @default(false) @map("is_custom")
+  addedByUserId Int?           @map("added_by_user_id")
+  addedByUser   User?          @relation("UserAddedGames", fields: [addedByUserId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   gameSessions  GameSession[]
   priceHistory  PriceHistory[]
   userLibraries UserLibrary[]
@@ -41,8 +45,8 @@ model GameSession {
   id              Int       @id @default(autoincrement())
   appUserId       Int       @map("app_user_id")
   gameId          Int       @map("game_id")
-  startedAt       DateTime  @db.Timestamp(6) @map("started_at")
-  endedAt         DateTime? @db.Timestamp(6) @map("ended_at")
+  startedAt       DateTime  @map("started_at") @db.Timestamp(6)
+  endedAt         DateTime? @map("ended_at") @db.Timestamp(6)
   durationMinutes Int?      @map("duration_minutes")
   appUser         User      @relation(fields: [appUserId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   game            Game      @relation(fields: [gameId], references: [id], onDelete: Cascade, onUpdate: NoAction)
@@ -53,7 +57,7 @@ model GameSession {
 model Platform {
   id            Int            @id @default(autoincrement())
   name          String         @unique @db.VarChar(50)
-  launchPrefix  String?        @db.VarChar(255) @map("launch_prefix")
+  launchPrefix  String?        @map("launch_prefix") @db.VarChar(255)
   priceHistory  PriceHistory[]
   userLibraries UserLibrary[]
 
@@ -66,18 +70,27 @@ model PriceHistory {
   gameId     Int       @map("game_id")
   platformId Int       @map("platform_id")
   price      Decimal   @db.Decimal(10, 2)
-  recordedAt DateTime? @default(now()) @db.Timestamp(6) @map("recorded_at")
+  recordedAt DateTime? @default(now()) @map("recorded_at") @db.Timestamp(6)
   game       Game      @relation(fields: [gameId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   platform   Platform  @relation(fields: [platformId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@map("price_history")
 }
 
+model Permission {
+  id          Int     @id @default(autoincrement())
+  action      String  @unique @db.VarChar(50)
+  description String? @db.VarChar(255)
+  roles       Role[]
+
+  @@map("permission")
+}
+
 model Role {
-  id              Int     @id @default(autoincrement())
-  name            String  @unique @db.VarChar(50)
-  canRemoteLaunch Boolean? @default(false) @map("can_remote_launch")
-  users           User[]
+  id          Int          @id @default(autoincrement())
+  name        String       @unique @db.VarChar(50)
+  users       User[]
+  permissions Permission[]
 
   @@map("role")
 }
@@ -87,8 +100,8 @@ model UserLibrary {
   appUserId      Int       @map("app_user_id")
   gameId         Int       @map("game_id")
   platformId     Int       @map("platform_id")
-  executablePath String?   @db.VarChar(500) @map("executable_path")
-  addedAt        DateTime? @default(now()) @db.Timestamp(6) @map("added_at")
+  executablePath String?   @map("executable_path") @db.VarChar(500)
+  addedAt        DateTime? @default(now()) @map("added_at") @db.Timestamp(6)
   appUser        User      @relation(fields: [appUserId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   game           Game      @relation(fields: [gameId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   platform       Platform  @relation(fields: [platformId], references: [id], onUpdate: NoAction)
@@ -101,8 +114,8 @@ model Wishlist {
   id          Int       @id @default(autoincrement())
   appUserId   Int       @map("app_user_id")
   gameId      Int       @map("game_id")
-  targetPrice Decimal?  @db.Decimal(10, 2) @map("target_price")
-  addedAt     DateTime? @default(now()) @db.Timestamp(6) @map("added_at")
+  targetPrice Decimal?  @map("target_price") @db.Decimal(10, 2)
+  addedAt     DateTime? @default(now()) @map("added_at") @db.Timestamp(6)
   appUser     User      @relation(fields: [appUserId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   game        Game      @relation(fields: [gameId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
