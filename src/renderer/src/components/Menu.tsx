@@ -1,12 +1,27 @@
-import { Link } from "react-router-dom";
+import { NavLink } from 'react-router-dom';
+import { useAuth } from '@renderer/context/AuthContext';
 
 function Menu(): React.JSX.Element {
+  const { user } = useAuth();
+  const isAdmin = user?.roleId === 1;
+
   return (
     <>
       <ul className="menu">
-        <li>All Games</li>
-        <li><Link to="/library">Library</Link></li>
-        <li>Wishlist</li>
+        <li>
+          <NavLink to="/games">Home</NavLink>
+        </li>
+        <li>
+          <NavLink to="/library">Library</NavLink>
+        </li>
+        <li>
+          <NavLink to="/wishlist">Wishlist</NavLink>
+        </li>
+        {isAdmin ? (
+          <li>
+            <NavLink to="/admin">Admin</NavLink>
+          </li>
+        ) : null}
       </ul>
     </>
   );

@@ -5,6 +5,10 @@ out
 .eslintcache
 *.log*
 .env
+.env.local
+
+# Allow committed examples only
+!.env.example
 
 /src/generated/prisma
 

@@ -1,5 +1,4 @@
-import { createContext, ReactNode, useContext } from 'react';
-import { useState } from 'react';
+import { createContext, ReactNode, useContext, useEffect, useState } from 'react';
 import { User } from '../../../shared/types';
 
 interface AuthContextType {
@@ -13,24 +12,33 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => {
-    const savedUser = localStorage.getItem("user");
-    if(savedUser) {
-        return JSON.parse(savedUser);
+    const savedUser = localStorage.getItem('user');
+    if (savedUser) {
+      return JSON.parse(savedUser);
     }
     return null;
   });
 
-  const login = (userData) => {
+  const login = (userData: User) => {
     setUser(userData);
-    localStorage.setItem("user", JSON.stringify(userData));
+    localStorage.setItem('user', JSON.stringify(userData));
   };
 
   const logout = () => {
     setUser(null);
-    localStorage.removeItem("user");
+    localStorage.removeItem('user');
   };
 
   const isAuthenticated = !!user;
+
+  useEffect(() => {
+    if (user?.id) {
+      void window.api.setActiveRemoteUser(user.id);
+      return;
+    }
+
+    void window.api.clearActiveRemoteUser();
+  }, [user]);
 
   return (
     <AuthContext.Provider value={{ user, login, logout, isAuthenticated }}>

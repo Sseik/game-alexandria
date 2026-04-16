@@ -1,18 +1,1083 @@
 import 'dotenv/config';
 import { app, shell, BrowserWindow, ipcMain } from 'electron';
 import { join } from 'path';
+import { spawn } from 'child_process';
+import { promisify } from 'util';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
 import icon from '../../resources/icon.png?asset';
 import { PrismaClient } from '../generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
 import bcrypt from 'bcrypt';
+import { initializeSupabaseIntegration, startSupabaseLaunchListener } from './supabaseIntegration';
+
+type GameRecord = {
+  id: number;
+  title: string;
+  description: string | null;
+  coverUrl: string | null;
+  igdbId: number | null;
+};
+
+type IgdbGame = {
+  id: number;
+  name?: string;
+  summary?: string | null;
+  cover?: { image_id?: string | null } | number | null;
+  platforms?: Array<{ name?: string | null }>;
+  websites?: Array<{ url?: string | null; category?: number | null }>;
+  game_logos?: Array<{ image_id?: string | null }> | number[];
+  artworks?: Array<{ image_id?: string | null }> | number[];
+  screenshots?: Array<{ image_id?: string | null }> | number[];
+  videos?: Array<{ video_id?: string | null }> | number[];
+  total_rating?: number | null;
+  rating?: number | null;
+};
+
+type ResolvedIgdbMedia = {
+  name?: string;
+  summary?: string | null;
+  coverUrl?: string;
+  logoUrl?: string;
+  screenshots?: string[];
+  videos?: string[];
+  score?: number | null;
+  platforms?: string[];
+  platformLinks?: Array<{ platform: string; url: string; launchUrl?: string; category?: number }>;
+};
+
+const IGDB_TITLE_ID_FALLBACKS: Record<string, number> = {
+  'fallout 1': 115,
+  undertale: 16662,
+  'risk of rain 1': 3173
+};
+
+const IGDB_WEBSITE_PLATFORM_MAP: Record<number, string> = {
+  13: 'Steam',
+  16: 'Epic Games',
+  17: 'GOG'
+};
+
+const IGDB_CLIENT_ID = process.env.IGDB_CLIENT_ID;
+const IGDB_CLIENT_SECRET = process.env.IGDB_CLIENT_SECRET;
+const IGDB_TOKEN_URL = 'https://id.twitch.tv/oauth2/token';
+const IGDB_API_BASE = 'https://api.igdb.com/v4';
+
+let igdbAccessToken: string | null = null;
+let igdbAccessTokenExpiry = 0;
+let igdbBackoffUntil = 0;
+let igdbRateLimitNotifiedAt = 0;
+type IgdbCacheEntry = {
+  promise: Promise<ResolvedIgdbMedia | null>;
+  expiresAt: number;
+};
+
+const IGDB_SUCCESS_CACHE_MS = 6 * 60 * 60 * 1000;
+const IGDB_FAILURE_CACHE_MS = 45 * 1000;
+const IGDB_INFLIGHT_CACHE_MS = 30 * 1000;
+const igdbGameCache = new Map<string, IgdbCacheEntry>();
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
+const execFileAsync = promisify(require('node:child_process').execFile);
+let activeRemoteUserEmail: string | null = null;
 
-function createWindow(): void {
+const trackedSessionIntervals = new Map<number, NodeJS.Timeout>();
+
+type DeeplinkSessionTracker = {
+  sessionId: number;
+  userId: number;
+  sawBlur: boolean;
+  launcherKind: 'steam' | 'epic' | 'other';
+  baselinePids: Set<number>;
+  trackedPid?: number;
+  fallbackTimer: NodeJS.Timeout;
+  processProbeTimer?: NodeJS.Timeout;
+  focusCloseTimer?: NodeJS.Timeout;
+};
+
+const DEEPLINK_EXPECT_BLUR_MS = 45000;
+const DEEPLINK_FOCUS_SETTLE_MS = 12000;
+const DEEPLINK_PROCESS_PROBE_MS = 7000;
+const deeplinkSessionTrackers = new Map<number, DeeplinkSessionTracker>();
+const activeDeeplinkSessionByUserId = new Map<number, number>();
+
+type RunningProcess = {
+  pid: number;
+  parentPid: number;
+  name: string;
+  commandLine: string;
+};
+
+function toHttpsUrl(url: string | null | undefined): string {
+  if (!url) {
+    return '';
+  }
+
+  return url.startsWith('//') ? `https:${url}` : url;
+}
+
+function normalizePlatformName(platformName: string): string {
+  const normalized = platformName.trim().toLowerCase();
+
+  if (normalized.includes('epic')) {
+    return 'Epic Games';
+  }
+
+  if (normalized.includes('steam')) {
+    return 'Steam';
+  }
+
+  if (normalized.includes('gog')) {
+    return 'GOG';
+  }
+
+  return platformName.trim();
+}
+
+function inferLaunchUrl(platformName: string, websiteUrl: string): string | undefined {
+  const normalizedPlatform = normalizePlatformName(platformName).toLowerCase();
+
+  if (websiteUrl.startsWith('steam://') || websiteUrl.startsWith('com.epicgames.launcher://')) {
+    return websiteUrl;
+  }
+
+  if (normalizedPlatform === 'steam') {
+    const steamMatch = websiteUrl.match(/\/app\/(\d+)/i);
+    if (steamMatch?.[1]) {
+      return `steam://run/${steamMatch[1]}`;
+    }
+  }
+
+  if (normalizedPlatform === 'epic games') {
+    const epicMatch = websiteUrl.match(/\/(?:p|product)\/([^/?#]+)/i);
+    if (epicMatch?.[1]) {
+      return `com.epicgames.launcher://store/product/${epicMatch[1]}`;
+    }
+  }
+
+  return undefined;
+}
+
+function escapeIgdbQuery(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function normalizeTitle(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function scoreTitleMatch(source: string, candidate: string): number {
+  const normalizedSource = normalizeTitle(source);
+  const normalizedCandidate = normalizeTitle(candidate);
+
+  if (!normalizedSource || !normalizedCandidate) {
+    return 0;
+  }
+
+  if (normalizedSource === normalizedCandidate) {
+    return 1;
+  }
+
+  if (
+    normalizedSource.includes(normalizedCandidate) ||
+    normalizedCandidate.includes(normalizedSource)
+  ) {
+    return 0.85;
+  }
+
+  const sourceTokens = new Set(normalizedSource.split(' '));
+  const candidateTokens = new Set(normalizedCandidate.split(' '));
+  const overlap = [...sourceTokens].filter((token) => candidateTokens.has(token)).length;
+  const union = new Set([...sourceTokens, ...candidateTokens]).size;
+
+  return union === 0 ? 0 : overlap / union;
+}
+
+function isLikelyPackageTitle(value: string): boolean {
+  const normalized = normalizeTitle(value);
+  return /(bundle|pack|collection|edition|complete|trilogy)/.test(normalized);
+}
+
+function pickBestGameMatch(sourceTitle: string, candidates: IgdbGame[]): IgdbGame | null {
+  if (!candidates.length) {
+    return null;
+  }
+
+  let best: { game: IgdbGame; score: number } | null = null;
+  const sourceIsPackage = isLikelyPackageTitle(sourceTitle);
+
+  for (const candidate of candidates) {
+    if (!sourceIsPackage && isLikelyPackageTitle(candidate.name || '')) {
+      continue;
+    }
+
+    const score = scoreTitleMatch(sourceTitle, candidate.name || '');
+    if (!best || score > best.score) {
+      best = { game: candidate, score };
+    }
+  }
+
+  // Reject weak matches to avoid displaying wrong game artwork.
+  return best && best.score >= 0.45 ? best.game : null;
+}
+
+async function getIgdbAccessToken(): Promise<string> {
+  if (igdbAccessToken && Date.now() < igdbAccessTokenExpiry) {
+    return igdbAccessToken;
+  }
+
+  if (!IGDB_CLIENT_ID || !IGDB_CLIENT_SECRET) {
+    throw new Error('Missing IGDB credentials');
+  }
+
+  const response = await fetch(
+    `${IGDB_TOKEN_URL}?client_id=${encodeURIComponent(IGDB_CLIENT_ID)}&client_secret=${encodeURIComponent(IGDB_CLIENT_SECRET)}&grant_type=client_credentials`,
+    { method: 'POST' }
+  );
+
+  if (!response.ok) {
+    throw new Error(`IGDB auth failed: ${response.status}`);
+  }
+
+  const data = (await response.json()) as { access_token: string; expires_in: number };
+  igdbAccessToken = data.access_token;
+  igdbAccessTokenExpiry = Date.now() + Math.max(0, data.expires_in - 60) * 1000;
+  return igdbAccessToken;
+}
+
+async function igdbFetch(endpoint: string, body: string): Promise<IgdbGame[]> {
+  if (Date.now() < igdbBackoffUntil) {
+    throw new Error('IGDB request skipped during rate-limit backoff window');
+  }
+
+  const token = await getIgdbAccessToken();
+  const response = await fetch(`${IGDB_API_BASE}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Client-ID': IGDB_CLIENT_ID ?? '',
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+      'Content-Type': 'text/plain'
+    },
+    body
+  });
+
+  if (response.status === 429) {
+    const retryAfterRaw = response.headers.get('Retry-After');
+    const retryAfterSeconds = Math.max(10, Number(retryAfterRaw || '60') || 60);
+    igdbBackoffUntil = Date.now() + retryAfterSeconds * 1000;
+    throw new Error(`IGDB rate-limited (429). Backing off for ${retryAfterSeconds}s`);
+  }
+
+  if (!response.ok) {
+    throw new Error(`IGDB request failed: ${response.status}`);
+  }
+
+  return (await response.json()) as IgdbGame[];
+}
+
+function extractImageId(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const imageId = (value as { image_id?: unknown }).image_id;
+  return typeof imageId === 'string' && imageId ? imageId : undefined;
+}
+
+function extractImageIds(values: unknown): string[] {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  return values
+    .map((value) => extractImageId(value))
+    .filter((value): value is string => Boolean(value));
+}
+
+function extractVideoIds(values: unknown): string[] {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  return values
+    .map((value) => {
+      if (!value || typeof value !== 'object') {
+        return undefined;
+      }
+
+      const videoId = (value as { video_id?: unknown }).video_id;
+      return typeof videoId === 'string' && videoId ? videoId : undefined;
+    })
+    .filter((value): value is string => Boolean(value));
+}
+
+function buildIgdbImageUrl(
+  imageId: string,
+  size: 't_cover_big' | 't_logo_med' | 't_screenshot_big' = 't_cover_big'
+): string {
+  return `https://images.igdb.com/igdb/image/upload/${size}/${imageId}.jpg`;
+}
+
+async function resolveIgdbMedia(game: GameRecord): Promise<ResolvedIgdbMedia | null> {
+  const fallbackIgdbId = game.igdbId
+    ? null
+    : (IGDB_TITLE_ID_FALLBACKS[normalizeTitle(game.title)] ?? null);
+  const effectiveIgdbId = game.igdbId ?? fallbackIgdbId;
+  const cacheKey = effectiveIgdbId ? `id:${effectiveIgdbId}` : `title:${game.title.toLowerCase()}`;
+  const now = Date.now();
+  const cached = igdbGameCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.promise;
+  }
+
+  if (cached && cached.expiresAt <= now) {
+    igdbGameCache.delete(cacheKey);
+  }
+
+  const request = (async () => {
+    try {
+      const primaryQuery = effectiveIgdbId
+        ? `fields name,summary,cover.image_id,platforms.name,websites.url,websites.category,game_logos.image_id,artworks.image_id,screenshots.image_id,videos.video_id,total_rating,rating; where id = ${effectiveIgdbId}; limit 1;`
+        : `search "${escapeIgdbQuery(game.title)}"; fields name,summary,cover.image_id,platforms.name,websites.url,websites.category,game_logos.image_id,artworks.image_id,screenshots.image_id,videos.video_id,total_rating,rating; limit 10;`;
+
+      // Some IGDB schemas/accounts may reject specific relation fields.
+      const results = await igdbFetch('/games', primaryQuery).catch(async () => {
+        const fallbackQuery = effectiveIgdbId
+          ? `fields name,summary,cover.image_id,platforms.name,websites.url,websites.category,artworks.image_id,screenshots.image_id,videos.video_id,total_rating,rating; where id = ${effectiveIgdbId}; limit 1;`
+          : `search "${escapeIgdbQuery(game.title)}"; fields name,summary,cover.image_id,platforms.name,websites.url,websites.category,artworks.image_id,screenshots.image_id,videos.video_id,total_rating,rating; limit 10;`;
+        return igdbFetch('/games', fallbackQuery);
+      });
+
+      const matchedGame = effectiveIgdbId ? results[0] : pickBestGameMatch(game.title, results);
+      if (!matchedGame) {
+        return null;
+      }
+
+      const coverImageId = extractImageId(matchedGame.cover);
+      const artworkImageId = extractImageIds(matchedGame.artworks)[0];
+      const logoImageId = extractImageIds(matchedGame.game_logos)[0];
+      const screenshotUrls = extractImageIds(matchedGame.screenshots)
+        .slice(0, 6)
+        .map((imageId) => buildIgdbImageUrl(imageId, 't_screenshot_big'));
+      const videoUrls = extractVideoIds(matchedGame.videos)
+        .slice(0, 2)
+        .map((videoId) => `https://www.youtube.com/embed/${videoId}`);
+
+      const coverUrl = coverImageId ? buildIgdbImageUrl(coverImageId, 't_cover_big') : null;
+      const artworkUrl = artworkImageId ? buildIgdbImageUrl(artworkImageId, 't_cover_big') : null;
+      const logoUrl = logoImageId ? buildIgdbImageUrl(logoImageId, 't_logo_med') : null;
+
+      const resolvedCover = coverUrl || artworkUrl || screenshotUrls[0] || undefined;
+      const resolvedLogo = logoUrl || resolvedCover;
+      const score = matchedGame.total_rating ?? matchedGame.rating ?? null;
+      const allPlatforms = new Set<string>();
+      const platformLinks: Array<{
+        platform: string;
+        url: string;
+        launchUrl?: string;
+        category?: number;
+      }> = [];
+
+      for (const website of matchedGame.websites ?? []) {
+        const rawUrl = toHttpsUrl(website.url);
+        if (!rawUrl) {
+          continue;
+        }
+
+        const platformFromCategory = website.category
+          ? IGDB_WEBSITE_PLATFORM_MAP[website.category]
+          : undefined;
+        const inferredFromDomain = rawUrl.includes('steampowered.com')
+          ? 'Steam'
+          : rawUrl.includes('epicgames.com')
+            ? 'Epic Games'
+            : rawUrl.includes('gog.com')
+              ? 'GOG'
+              : undefined;
+        const platform = platformFromCategory || inferredFromDomain;
+
+        if (!platform) {
+          continue;
+        }
+
+        const normalizedPlatform = normalizePlatformName(platform);
+        allPlatforms.add(normalizedPlatform);
+
+        platformLinks.push({
+          platform: normalizedPlatform,
+          url: rawUrl,
+          launchUrl: inferLaunchUrl(normalizedPlatform, rawUrl),
+          category: website.category ?? undefined
+        });
+      }
+
+      for (const platform of matchedGame.platforms ?? []) {
+        if (!platform?.name) {
+          continue;
+        }
+        allPlatforms.add(normalizePlatformName(platform.name));
+      }
+
+      return {
+        name: matchedGame.name,
+        summary: matchedGame.summary,
+        coverUrl: resolvedCover,
+        logoUrl: resolvedLogo,
+        screenshots: screenshotUrls,
+        videos: videoUrls,
+        score,
+        platforms: [...allPlatforms],
+        platformLinks
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isRateLimited = message.includes('429') || message.includes('rate-limit');
+
+      if (isRateLimited) {
+        const now = Date.now();
+        if (now - igdbRateLimitNotifiedAt > 30000) {
+          igdbRateLimitNotifiedAt = now;
+          console.warn('IGDB rate-limited. Using local DB metadata until backoff expires.');
+        }
+      } else {
+        console.error('Failed to resolve IGDB media', error);
+      }
+
+      return null;
+    }
+  })();
+
+  igdbGameCache.set(cacheKey, {
+    promise: request,
+    expiresAt: now + IGDB_INFLIGHT_CACHE_MS
+  });
+
+  void request
+    .then((resolved) => {
+      const retryDelay = Math.max(IGDB_FAILURE_CACHE_MS, igdbBackoffUntil - Date.now() + 2000);
+      igdbGameCache.set(cacheKey, {
+        promise: Promise.resolve(resolved),
+        expiresAt: Date.now() + (resolved ? IGDB_SUCCESS_CACHE_MS : retryDelay)
+      });
+    })
+    .catch(() => {
+      igdbGameCache.delete(cacheKey);
+    });
+
+  return request;
+}
+
+async function enrichGame(game: GameRecord) {
+  const media = await resolveIgdbMedia(game);
+  const coverUrl = toHttpsUrl(media?.coverUrl || media?.logoUrl || game.coverUrl);
+  const logoUrl = toHttpsUrl(media?.logoUrl || media?.coverUrl || game.coverUrl);
+  const screenshots =
+    media?.screenshots
+      ?.map((url) => toHttpsUrl(url))
+      .filter((url) => Boolean(url && url !== coverUrl)) ?? [];
+  const videos = media?.videos?.filter((url) => Boolean(url)) ?? [];
+
+  return {
+    id: String(game.id),
+    title: media?.name || game.title,
+    description: media?.summary ?? game.description ?? undefined,
+    coverUrl,
+    logoUrl: logoUrl || undefined,
+    screenshots,
+    videos,
+    score: media?.score ?? null,
+    platformId: '',
+    path: undefined,
+    igdbId: game.igdbId,
+    platforms: media?.platforms ?? [],
+    platformLinks: media?.platformLinks ?? []
+  };
+}
+
+function formatUtcDateLabel(date: Date): string {
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+function getDefaultLaunchPrefix(platformName: string): string | null {
+  const normalizedName = normalizePlatformName(platformName).toLowerCase();
+
+  if (normalizedName === 'steam') {
+    return 'steam://run/';
+  }
+
+  if (normalizedName === 'epic games') {
+    return 'com.epicgames.launcher://store/product/';
+  }
+
+  return null;
+}
+
+function slugifyTitle(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function buildAutoLaunchTarget(
+  platformName: string,
+  launchPrefix: string | null | undefined,
+  game: Pick<GameRecord, 'title' | 'igdbId'>
+): string | null {
+  if (!launchPrefix) {
+    return null;
+  }
+
+  const normalizedPlatform = normalizePlatformName(platformName).toLowerCase();
+
+  if (game.igdbId) {
+    return `${launchPrefix}${game.igdbId}`;
+  }
+
+  if (normalizedPlatform === 'epic games') {
+    const slug = slugifyTitle(game.title);
+    return slug ? `${launchPrefix}${slug}` : null;
+  }
+
+  return null;
+}
+
+function computeSessionDurationMinutes(startedAt: Date, endedAt: Date): number {
+  const diffMs = Math.max(0, endedAt.getTime() - startedAt.getTime());
+  return Math.max(1, Math.round(diffMs / 60000));
+}
+
+function looksLikeWindowsPath(target: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(target);
+}
+
+function getExternalLauncherKind(
+  target: string,
+  platformName?: string
+): 'steam' | 'epic' | 'other' | null {
+  const normalizedTarget = target.trim().toLowerCase();
+  const normalizedPlatform = (platformName || '').trim().toLowerCase();
+
+  if (looksLikeWindowsPath(normalizedTarget)) {
+    return null;
+  }
+
+  if (normalizedTarget.startsWith('steam://') || normalizedPlatform.includes('steam')) {
+    return 'steam';
+  }
+
+  if (
+    normalizedTarget.startsWith('com.epicgames.launcher://') ||
+    normalizedPlatform.includes('epic')
+  ) {
+    return 'epic';
+  }
+
+  if (/^[a-z][a-z\d+.-]*:/i.test(normalizedTarget)) {
+    return 'other';
+  }
+
+  return null;
+}
+
+async function listRunningProcesses(): Promise<RunningProcess[]> {
+  if (process.platform !== 'win32') {
+    return [];
+  }
+
+  const script =
+    "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress";
+
+  const { stdout } = (await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], {
+    windowsHide: true,
+    maxBuffer: 1024 * 1024 * 12
+  })) as { stdout: string; stderr: string };
+
+  const raw = stdout.trim();
+  if (!raw) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+
+  const items = Array.isArray(parsed) ? parsed : [parsed];
+
+  return items
+    .map((item) => {
+      const processRow = item as {
+        ProcessId?: number;
+        ParentProcessId?: number;
+        Name?: string;
+        CommandLine?: string;
+      };
+
+      return {
+        pid: Number(processRow.ProcessId || 0),
+        parentPid: Number(processRow.ParentProcessId || 0),
+        name: String(processRow.Name || ''),
+        commandLine: String(processRow.CommandLine || '')
+      };
+    })
+    .filter((entry) => entry.pid > 0 && entry.name);
+}
+
+function hasLauncherAncestor(
+  processByPid: Map<number, RunningProcess>,
+  processEntry: RunningProcess,
+  launcherNames: Set<string>
+): boolean {
+  let current = processEntry;
+  for (let index = 0; index < 7; index += 1) {
+    const next = processByPid.get(current.parentPid);
+    if (!next) {
+      return false;
+    }
+
+    if (launcherNames.has(next.name.toLowerCase())) {
+      return true;
+    }
+
+    current = next;
+  }
+
+  return false;
+}
+
+function pickLauncherChildProcess(
+  processes: RunningProcess[],
+  baselinePids: Set<number>,
+  launcherKind: 'steam' | 'epic'
+): RunningProcess | null {
+  const launcherNames =
+    launcherKind === 'steam'
+      ? new Set(['steam.exe'])
+      : new Set(['epicgameslauncher.exe', 'epicwebhelper.exe']);
+
+  const ignoredNames = new Set([
+    'steam.exe',
+    'epicgameslauncher.exe',
+    'epicwebhelper.exe',
+    'eosoverlayrenderer-win64-shipping.exe',
+    'eosoverlayrenderer-win32-shipping.exe',
+    'conhost.exe',
+    'cmd.exe',
+    'powershell.exe',
+    'explorer.exe',
+    'gamealexandria.exe',
+    'electron.exe'
+  ]);
+
+  const processByPid = new Map<number, RunningProcess>(processes.map((item) => [item.pid, item]));
+
+  const candidates = processes.filter((processEntry) => {
+    const normalizedName = processEntry.name.toLowerCase();
+    if (baselinePids.has(processEntry.pid)) {
+      return false;
+    }
+
+    if (ignoredNames.has(normalizedName)) {
+      return false;
+    }
+
+    if (!hasLauncherAncestor(processByPid, processEntry, launcherNames)) {
+      return false;
+    }
+
+    return true;
+  });
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  candidates.sort((left, right) => {
+    const leftScore = left.commandLine.length;
+    const rightScore = right.commandLine.length;
+    return rightScore - leftScore;
+  });
+
+  return candidates[0] ?? null;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function closeSessionById(sessionId: number, endedAt = new Date()): Promise<void> {
+  clearDeeplinkSessionTracker(sessionId);
+
+  const session = await prisma.gameSession.findUnique({
+    where: { id: sessionId },
+    select: {
+      id: true,
+      startedAt: true,
+      endedAt: true
+    }
+  });
+
+  if (!session || session.endedAt) {
+    return;
+  }
+
+  await prisma.gameSession.update({
+    where: { id: sessionId },
+    data: {
+      endedAt,
+      durationMinutes: computeSessionDurationMinutes(session.startedAt, endedAt)
+    }
+  });
+}
+
+function clearDeeplinkSessionTracker(sessionId: number): void {
+  const tracker = deeplinkSessionTrackers.get(sessionId);
+  if (!tracker) {
+    return;
+  }
+
+  clearTimeout(tracker.fallbackTimer);
+  if (tracker.processProbeTimer) {
+    clearInterval(tracker.processProbeTimer);
+  }
+  if (tracker.focusCloseTimer) {
+    clearTimeout(tracker.focusCloseTimer);
+  }
+
+  deeplinkSessionTrackers.delete(sessionId);
+
+  const activeForUser = activeDeeplinkSessionByUserId.get(tracker.userId);
+  if (activeForUser === sessionId) {
+    activeDeeplinkSessionByUserId.delete(tracker.userId);
+  }
+}
+
+function startDeeplinkSessionTracker(
+  sessionId: number,
+  userId: number,
+  launcherKind: 'steam' | 'epic' | 'other',
+  baselinePids: Set<number>
+): void {
+  const previousSessionId = activeDeeplinkSessionByUserId.get(userId);
+  if (typeof previousSessionId === 'number') {
+    clearDeeplinkSessionTracker(previousSessionId);
+  }
+
+  const fallbackTimer = setTimeout(() => {
+    const tracker = deeplinkSessionTrackers.get(sessionId);
+    if (!tracker || tracker.sawBlur) {
+      return;
+    }
+
+    void closeSessionById(sessionId);
+  }, DEEPLINK_EXPECT_BLUR_MS);
+
+  deeplinkSessionTrackers.set(sessionId, {
+    sessionId,
+    userId,
+    sawBlur: false,
+    launcherKind,
+    baselinePids,
+    fallbackTimer
+  });
+  activeDeeplinkSessionByUserId.set(userId, sessionId);
+
+  if (launcherKind === 'steam' || launcherKind === 'epic') {
+    const probeTimer = setInterval(() => {
+      const tracker = deeplinkSessionTrackers.get(sessionId);
+      if (!tracker || tracker.trackedPid || !tracker.sawBlur) {
+        return;
+      }
+
+      void (async () => {
+        const running = await listRunningProcesses();
+        const match = pickLauncherChildProcess(running, tracker.baselinePids, launcherKind);
+        if (!match) {
+          return;
+        }
+
+        tracker.trackedPid = match.pid;
+        if (tracker.focusCloseTimer) {
+          clearTimeout(tracker.focusCloseTimer);
+          tracker.focusCloseTimer = undefined;
+        }
+        startSessionProcessTracker(sessionId, match.pid);
+      })();
+    }, DEEPLINK_PROCESS_PROBE_MS);
+
+    const tracker = deeplinkSessionTrackers.get(sessionId);
+    if (tracker) {
+      tracker.processProbeTimer = probeTimer;
+    }
+  }
+}
+
+function markDeeplinkSessionsBlurred(): void {
+  for (const tracker of deeplinkSessionTrackers.values()) {
+    tracker.sawBlur = true;
+
+    if (tracker.focusCloseTimer) {
+      clearTimeout(tracker.focusCloseTimer);
+      tracker.focusCloseTimer = undefined;
+    }
+  }
+}
+
+function scheduleDeeplinkCloseOnFocus(): void {
+  for (const tracker of deeplinkSessionTrackers.values()) {
+    if (!tracker.sawBlur || tracker.trackedPid) {
+      continue;
+    }
+
+    if (tracker.focusCloseTimer) {
+      clearTimeout(tracker.focusCloseTimer);
+    }
+
+    tracker.focusCloseTimer = setTimeout(() => {
+      if (!BrowserWindow.getFocusedWindow()) {
+        return;
+      }
+
+      void closeSessionById(tracker.sessionId);
+    }, DEEPLINK_FOCUS_SETTLE_MS);
+  }
+}
+
+function startSessionProcessTracker(sessionId: number, pid: number): void {
+  const existingInterval = trackedSessionIntervals.get(sessionId);
+  if (existingInterval) {
+    clearInterval(existingInterval);
+  }
+
+  const interval = setInterval(() => {
+    if (isProcessAlive(pid)) {
+      return;
+    }
+
+    clearInterval(interval);
+    trackedSessionIntervals.delete(sessionId);
+    void closeSessionById(sessionId);
+  }, 15000);
+
+  trackedSessionIntervals.set(sessionId, interval);
+}
+
+async function endOpenSessionsForUser(userId: number, endedAt: Date): Promise<void> {
+  const openSessions = await prisma.gameSession.findMany({
+    where: {
+      appUserId: userId,
+      endedAt: null
+    },
+    select: {
+      id: true,
+      startedAt: true
+    }
+  });
+
+  for (const openSession of openSessions) {
+    clearDeeplinkSessionTracker(openSession.id);
+
+    const trackedInterval = trackedSessionIntervals.get(openSession.id);
+    if (trackedInterval) {
+      clearInterval(trackedInterval);
+      trackedSessionIntervals.delete(openSession.id);
+    }
+
+    await prisma.gameSession.update({
+      where: { id: openSession.id },
+      data: {
+        endedAt,
+        durationMinutes: computeSessionDurationMinutes(openSession.startedAt, endedAt)
+      }
+    });
+  }
+}
+
+async function openLaunchTarget(target: string): Promise<void> {
+  const normalizedTarget = target.trim();
+  const looksLikeProtocol =
+    !looksLikeWindowsPath(normalizedTarget) && /^[a-z][a-z\d+.-]*:/i.test(normalizedTarget);
+
+  if (looksLikeProtocol) {
+    await shell.openExternal(normalizedTarget);
+    return;
+  }
+
+  if (/\.(exe|bat|cmd|com)$/i.test(normalizedTarget)) {
+    try {
+      const child = spawn(normalizedTarget, [], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      });
+      child.unref();
+      return;
+    } catch {
+      // Fall through to shell.openPath for non-standard launch targets.
+    }
+  }
+
+  const openPathError = await shell.openPath(normalizedTarget);
+  if (openPathError) {
+    throw new Error(openPathError);
+  }
+}
+
+async function openLaunchTargetWithProcess(target: string): Promise<number | null> {
+  const normalizedTarget = target.trim();
+  const looksLikeProtocol =
+    !looksLikeWindowsPath(normalizedTarget) && /^[a-z][a-z\d+.-]*:/i.test(normalizedTarget);
+
+  if (looksLikeProtocol) {
+    await shell.openExternal(normalizedTarget);
+    return null;
+  }
+
+  if (/\.(exe|bat|cmd|com)$/i.test(normalizedTarget)) {
+    try {
+      const child = spawn(normalizedTarget, [], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      });
+      child.unref();
+      return typeof child.pid === 'number' ? child.pid : null;
+    } catch {
+      // Fall through to shell.openPath.
+    }
+  }
+
+  await openLaunchTarget(normalizedTarget);
+  return null;
+}
+
+async function launchLibraryGameInternal(
+  userId: number,
+  gameId: string,
+  platformId?: string
+): Promise<{ success: boolean; error?: string }> {
+  const libraryEntry = await prisma.userLibrary.findFirst({
+    where: {
+      appUserId: userId,
+      gameId: Number(gameId),
+      ...(platformId ? { platformId: Number(platformId) } : {})
+    },
+    select: {
+      gameId: true,
+      executablePath: true,
+      platformId: true,
+      platform: {
+        select: {
+          name: true
+        }
+      }
+    },
+    orderBy: {
+      addedAt: 'desc'
+    }
+  });
+
+  if (!libraryEntry?.executablePath) {
+    return { success: false, error: 'Launch path is not configured for this game.' };
+  }
+
+  try {
+    const launchedAt = new Date();
+    const launcherKind = getExternalLauncherKind(
+      libraryEntry.executablePath,
+      libraryEntry.platform?.name
+    );
+    const baselineProcesses =
+      launcherKind === 'steam' || launcherKind === 'epic' ? await listRunningProcesses() : [];
+    const baselinePids = new Set<number>(baselineProcesses.map((processEntry) => processEntry.pid));
+
+    const trackedPid = await openLaunchTargetWithProcess(libraryEntry.executablePath);
+
+    await endOpenSessionsForUser(userId, launchedAt);
+
+    const createdSession = await prisma.gameSession.create({
+      data: {
+        appUserId: userId,
+        gameId: libraryEntry.gameId,
+        startedAt: launchedAt,
+        endedAt: null,
+        durationMinutes: null
+      },
+      select: {
+        id: true
+      }
+    });
+
+    if (trackedPid) {
+      startSessionProcessTracker(createdSession.id, trackedPid);
+    } else {
+      startDeeplinkSessionTracker(createdSession.id, userId, launcherKind || 'other', baselinePids);
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Failed to launch game', error);
+    return { success: false, error: 'Unable to launch this game from its configured target.' };
+  }
+}
+
+async function launchLibraryGameByEmail(
+  email: string,
+  gameId: string,
+  platformName?: string
+): Promise<{ success: boolean; error?: string }> {
+  const user = await prisma.user.findUnique({
+    where: { email },
+    select: { id: true }
+  });
+
+  if (!user) {
+    return { success: false, error: 'No local desktop user found for this email.' };
+  }
+
+  const matchedEntry = await prisma.userLibrary.findFirst({
+    where: {
+      appUserId: user.id,
+      gameId: Number(gameId),
+      ...(platformName
+        ? {
+            platform: {
+              name: {
+                equals: platformName,
+                mode: 'insensitive'
+              }
+            }
+          }
+        : {})
+    },
+    select: {
+      platformId: true
+    }
+  });
+
+  return launchLibraryGameInternal(
+    user.id,
+    gameId,
+    matchedEntry?.platformId ? String(matchedEntry.platformId) : undefined
+  );
+}
+
+function createWindow(): BrowserWindow {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
     width: 900,
@@ -42,12 +1107,14 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
   }
+
+  return mainWindow;
 }
 
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron');
 
@@ -61,7 +1128,23 @@ app.whenReady().then(() => {
   // IPC test
   ipcMain.on('ping', () => console.log('pong'));
 
-  createWindow();
+  const mainWindow = createWindow();
+  await initializeSupabaseIntegration(mainWindow);
+  startSupabaseLaunchListener({
+    getActiveUserEmail: () => activeRemoteUserEmail,
+    onLaunchCommand: async (command) => {
+      const result = await launchLibraryGameByEmail(
+        command.targetEmail,
+        command.gameId,
+        command.platformName
+      );
+
+      return {
+        status: result.success ? 'success' : 'failed',
+        message: result.error
+      };
+    }
+  });
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the
@@ -69,8 +1152,113 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 
+  app.on('browser-window-blur', () => {
+    markDeeplinkSessionsBlurred();
+  });
+
+  app.on('browser-window-focus', () => {
+    scheduleDeeplinkCloseOnFocus();
+  });
+
   ipcMain.handle('get-games', async () => {
-    return await prisma.game.findMany();
+    const games = await prisma.game.findMany({
+      select: {
+        id: true,
+        title: true,
+        description: true,
+        coverUrl: true,
+        igdbId: true
+      }
+    });
+
+    const enrichedGames = await Promise.all(games.map((game) => enrichGame(game)));
+    const orderedByScore = [...enrichedGames].sort((a, b) => {
+      const left = typeof a.score === 'number' ? a.score : -1;
+      const right = typeof b.score === 'number' ? b.score : -1;
+      return right - left;
+    });
+
+    return orderedByScore.map((game) => ({
+      ...game,
+      platformId: ''
+    }));
+  });
+
+  ipcMain.handle('get-game-details', async (_, gameId: string) => {
+    const game = await prisma.game.findUnique({
+      where: { id: Number(gameId) },
+      select: {
+        id: true,
+        title: true,
+        description: true,
+        coverUrl: true,
+        igdbId: true,
+        priceHistory: {
+          select: {
+            price: true,
+            recordedAt: true,
+            platform: {
+              select: {
+                name: true
+              }
+            }
+          },
+          orderBy: {
+            recordedAt: 'asc'
+          }
+        },
+        userLibraries: {
+          select: {
+            platform: {
+              select: {
+                name: true
+              }
+            }
+          }
+        }
+      }
+    });
+
+    if (!game) {
+      return null;
+    }
+
+    const enrichedGame = await enrichGame(game);
+    const platformNames = [
+      ...new Set([
+        ...(enrichedGame.platforms ?? []),
+        ...game.userLibraries.map((entry) => entry.platform.name),
+        ...game.priceHistory.map((entry) => entry.platform.name)
+      ])
+    ];
+
+    const rawPricePoints = game.priceHistory.map((entry) => ({
+      label: entry.recordedAt
+        ? new Date(entry.recordedAt).toLocaleDateString('en-US', {
+            month: 'short',
+            year: 'numeric'
+          })
+        : 'Unknown',
+      price: Number(entry.price)
+    }));
+
+    const priceHistory = rawPricePoints.length > 8 ? rawPricePoints.slice(-8) : rawPricePoints;
+    const prices = rawPricePoints.map((point) => point.price);
+    const priceStats = prices.length
+      ? {
+          current: prices[prices.length - 1],
+          lowest: Math.min(...prices),
+          highest: Math.max(...prices)
+        }
+      : undefined;
+
+    return {
+      ...enrichedGame,
+      platformId: '',
+      platforms: platformNames,
+      priceHistory,
+      priceStats
+    };
   });
 
   ipcMain.handle('auth:login', async (_, { email, password }) => {
@@ -86,10 +1274,26 @@ app.whenReady().then(() => {
       if (!isMatch) return { success: false, error: 'Wrong password' };
 
       const { passwordHash, ...safeUser } = user;
+      activeRemoteUserEmail = user.email;
       return { success: true, user: safeUser };
     } catch (err) {
       return { success: false, error: 'Database error' };
     }
+  });
+
+  ipcMain.handle('auth:set-active-user', async (_, userId: number) => {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true }
+    });
+
+    activeRemoteUserEmail = user?.email ?? null;
+    return { success: true };
+  });
+
+  ipcMain.handle('auth:clear-active-user', async () => {
+    activeRemoteUserEmail = null;
+    return { success: true };
   });
 
   ipcMain.handle('get-library', async (_, userId: number) => {
@@ -97,15 +1301,20 @@ app.whenReady().then(() => {
       select: {
         id: true,
         executablePath: true,
-        platform: {
-          select: {
-            id: true
-          }
-        },
         game: {
           select: {
+            id: true,
+            title: true,
+            description: true,
             coverUrl: true,
-            title: true
+            igdbId: true
+          }
+        },
+        platform: {
+          select: {
+            id: true,
+            name: true,
+            launchPrefix: true
           }
         }
       },
@@ -113,14 +1322,598 @@ app.whenReady().then(() => {
         appUserId: userId
       }
     });
-    return games.map((item) => {
-      const {
-        platform: { id: platformId },
-        game: {title, coverUrl},
-        executablePath
-      } = item;
-      return { title, coverUrl, executablePath, platformId };
+
+    const enrichedGames = await Promise.all(
+      games.map(async (item) => {
+        const media = await resolveIgdbMedia(item.game);
+        const coverUrl = toHttpsUrl(media?.coverUrl || media?.logoUrl || item.game.coverUrl);
+        const logoUrl = toHttpsUrl(media?.logoUrl || media?.coverUrl || item.game.coverUrl);
+
+        return {
+          libraryEntryId: String(item.id),
+          id: String(item.game.id),
+          title: media?.name || item.game.title,
+          coverUrl,
+          logoUrl: logoUrl || undefined,
+          description: media?.summary ?? item.game.description ?? undefined,
+          executablePath: item.executablePath,
+          platformId: String(item.platform.id),
+          platformName: item.platform.name,
+          platforms: media?.platforms ?? [],
+          platformLinks: media?.platformLinks ?? [],
+          igdbId: item.game.igdbId
+        };
+      })
+    );
+
+    return enrichedGames;
+  });
+
+  ipcMain.handle('get-wishlist', async (_, userId: number) => {
+    const wishlistItems = await prisma.wishlist.findMany({
+      where: {
+        appUserId: userId
+      },
+      orderBy: {
+        addedAt: 'desc'
+      },
+      select: {
+        id: true,
+        targetPrice: true,
+        addedAt: true,
+        game: {
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            coverUrl: true,
+            igdbId: true
+          }
+        }
+      }
     });
+
+    const enrichedGames = await Promise.all(
+      wishlistItems.map(async (item) => {
+        const enriched = await enrichGame(item.game);
+
+        return {
+          ...enriched,
+          platformId: '',
+          targetPrice: item.targetPrice ? Number(item.targetPrice) : null,
+          addedAt: item.addedAt?.toISOString()
+        };
+      })
+    );
+
+    return enrichedGames;
+  });
+
+  ipcMain.handle(
+    'wishlist:add',
+    async (_, userId: number, gameId: string, targetPrice?: number) => {
+      await prisma.wishlist.upsert({
+        where: {
+          appUserId_gameId: {
+            appUserId: userId,
+            gameId: Number(gameId)
+          }
+        },
+        update: {
+          targetPrice: typeof targetPrice === 'number' ? targetPrice : null
+        },
+        create: {
+          appUserId: userId,
+          gameId: Number(gameId),
+          targetPrice: typeof targetPrice === 'number' ? targetPrice : null
+        }
+      });
+
+      return { success: true };
+    }
+  );
+
+  ipcMain.handle(
+    'library:update-entry',
+    async (
+      _,
+      userId: number,
+      gameId: string,
+      currentPlatformId: string,
+      platformName: string,
+      executablePath?: string
+    ) => {
+      const normalizedName = normalizePlatformName(platformName);
+      const numericGameId = Number(gameId);
+      const numericCurrentPlatformId = Number(currentPlatformId);
+
+      const [user, game, currentEntry] = await Promise.all([
+        prisma.user.findUnique({
+          where: { id: userId },
+          select: { id: true }
+        }),
+        prisma.game.findUnique({
+          where: { id: numericGameId },
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            coverUrl: true,
+            igdbId: true
+          }
+        }),
+        prisma.userLibrary.findUnique({
+          where: {
+            appUserId_gameId_platformId: {
+              appUserId: userId,
+              gameId: numericGameId,
+              platformId: numericCurrentPlatformId
+            }
+          },
+          select: {
+            id: true
+          }
+        })
+      ]);
+
+      if (!user) {
+        return { success: false, error: 'Session expired. Please log in again.' };
+      }
+
+      if (!game) {
+        return { success: false, error: 'Game not found.' };
+      }
+
+      if (!currentEntry) {
+        return { success: false, error: 'Library entry not found.' };
+      }
+
+      const existingPlatform = await prisma.platform.findFirst({
+        where: {
+          name: {
+            equals: normalizedName,
+            mode: 'insensitive'
+          }
+        },
+        select: {
+          id: true,
+          name: true,
+          launchPrefix: true
+        }
+      });
+
+      const platform =
+        existingPlatform ??
+        (await prisma.platform.create({
+          data: {
+            name: normalizedName,
+            launchPrefix: getDefaultLaunchPrefix(normalizedName)
+          },
+          select: {
+            id: true,
+            name: true,
+            launchPrefix: true
+          }
+        }));
+
+      let resolvedLaunchTarget = executablePath?.trim() || null;
+
+      if (!resolvedLaunchTarget) {
+        const media = await resolveIgdbMedia(game);
+        const matchedLink = media?.platformLinks?.find(
+          (link) => link.platform.toLowerCase() === normalizedName.toLowerCase() && link.launchUrl
+        );
+
+        resolvedLaunchTarget =
+          matchedLink?.launchUrl?.trim() ||
+          buildAutoLaunchTarget(normalizedName, platform.launchPrefix, game) ||
+          null;
+      }
+
+      await prisma.$transaction(async (transaction) => {
+        await transaction.userLibrary.upsert({
+          where: {
+            appUserId_gameId_platformId: {
+              appUserId: userId,
+              gameId: numericGameId,
+              platformId: platform.id
+            }
+          },
+          update: {
+            executablePath: resolvedLaunchTarget
+          },
+          create: {
+            appUserId: userId,
+            gameId: numericGameId,
+            platformId: platform.id,
+            executablePath: resolvedLaunchTarget
+          }
+        });
+
+        if (platform.id !== numericCurrentPlatformId) {
+          await transaction.userLibrary.delete({
+            where: { id: currentEntry.id }
+          });
+        }
+      });
+
+      return { success: true };
+    }
+  );
+
+  ipcMain.handle('wishlist:contains', async (_, userId: number, gameId: string) => {
+    const item = await prisma.wishlist.findUnique({
+      where: {
+        appUserId_gameId: {
+          appUserId: userId,
+          gameId: Number(gameId)
+        }
+      },
+      select: {
+        id: true
+      }
+    });
+
+    return { exists: Boolean(item) };
+  });
+
+  ipcMain.handle('wishlist:remove', async (_, userId: number, gameId: string) => {
+    await prisma.wishlist.deleteMany({
+      where: {
+        appUserId: userId,
+        gameId: Number(gameId)
+      }
+    });
+
+    return { success: true };
+  });
+
+  ipcMain.handle('library:get-platforms', async () => {
+    const platforms = await prisma.platform.findMany({
+      orderBy: {
+        name: 'asc'
+      },
+      select: {
+        id: true,
+        name: true,
+        launchPrefix: true
+      }
+    });
+
+    return platforms;
+  });
+
+  ipcMain.handle(
+    'library:add-game',
+    async (_, userId: number, gameId: string, platformName: string, executablePath?: string) => {
+      const normalizedName = normalizePlatformName(platformName);
+      const numericGameId = Number(gameId);
+
+      const [user, game] = await Promise.all([
+        prisma.user.findUnique({
+          where: { id: userId },
+          select: { id: true }
+        }),
+        prisma.game.findUnique({
+          where: { id: numericGameId },
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            coverUrl: true,
+            igdbId: true
+          }
+        })
+      ]);
+
+      if (!user) {
+        return { success: false, error: 'Session expired. Please log in again.' };
+      }
+
+      if (!game) {
+        return { success: false, error: 'Game not found.' };
+      }
+
+      const existingPlatform = await prisma.platform.findFirst({
+        where: {
+          name: {
+            equals: normalizedName,
+            mode: 'insensitive'
+          }
+        },
+        select: {
+          id: true,
+          name: true,
+          launchPrefix: true
+        }
+      });
+
+      const platform =
+        existingPlatform ??
+        (await prisma.platform.create({
+          data: {
+            name: normalizedName,
+            launchPrefix: getDefaultLaunchPrefix(normalizedName)
+          },
+          select: {
+            id: true,
+            name: true,
+            launchPrefix: true
+          }
+        }));
+
+      let resolvedLaunchTarget = executablePath?.trim() || null;
+
+      if (!resolvedLaunchTarget) {
+        const media = await resolveIgdbMedia(game);
+        const matchedLink = media?.platformLinks?.find(
+          (link) => link.platform.toLowerCase() === normalizedName.toLowerCase() && link.launchUrl
+        );
+
+        resolvedLaunchTarget =
+          matchedLink?.launchUrl?.trim() ||
+          buildAutoLaunchTarget(normalizedName, platform.launchPrefix, game) ||
+          null;
+      }
+
+      await prisma.userLibrary.upsert({
+        where: {
+          appUserId_gameId_platformId: {
+            appUserId: userId,
+            gameId: numericGameId,
+            platformId: platform.id
+          }
+        },
+        update: {
+          executablePath: resolvedLaunchTarget
+        },
+        create: {
+          appUserId: userId,
+          gameId: numericGameId,
+          platformId: platform.id,
+          executablePath: resolvedLaunchTarget
+        }
+      });
+
+      return { success: true };
+    }
+  );
+
+  ipcMain.handle(
+    'library:launch',
+    async (_, userId: number, gameId: string, platformId?: string) => {
+      return launchLibraryGameInternal(userId, gameId, platformId);
+    }
+  );
+
+  ipcMain.handle('sessions:recent-games', async (_, userId: number, limit = 4) => {
+    const recentSessions = await prisma.gameSession.findMany({
+      where: {
+        appUserId: userId
+      },
+      orderBy: {
+        startedAt: 'desc'
+      },
+      take: Math.max(12, Math.min(limit * 6, 72)),
+      select: {
+        gameId: true,
+        startedAt: true,
+        game: {
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            coverUrl: true,
+            igdbId: true
+          }
+        }
+      }
+    });
+
+    const dedupedByGame = new Map<number, { game: GameRecord; startedAt: Date }>();
+    for (const session of recentSessions) {
+      if (!dedupedByGame.has(session.gameId)) {
+        dedupedByGame.set(session.gameId, { game: session.game, startedAt: session.startedAt });
+      }
+    }
+
+    const launchableGames = await Promise.all(
+      [...dedupedByGame.values()].slice(0, limit).map(async (entry) => {
+        const [media, libraryEntry] = await Promise.all([
+          resolveIgdbMedia(entry.game),
+          prisma.userLibrary.findFirst({
+            where: {
+              appUserId: userId,
+              gameId: entry.game.id
+            },
+            orderBy: {
+              addedAt: 'desc'
+            },
+            select: {
+              platformId: true,
+              executablePath: true,
+              platform: {
+                select: {
+                  name: true
+                }
+              }
+            }
+          })
+        ]);
+
+        return {
+          gameId: String(entry.game.id),
+          title: media?.name || entry.game.title,
+          image: toHttpsUrl(media?.coverUrl || media?.logoUrl || entry.game.coverUrl),
+          platformId: libraryEntry?.platformId ? String(libraryEntry.platformId) : undefined,
+          platformName: libraryEntry?.platform.name,
+          canLaunch: Boolean(libraryEntry?.executablePath),
+          lastPlayedAt: entry.startedAt.toISOString()
+        };
+      })
+    );
+
+    return launchableGames;
+  });
+
+  ipcMain.handle('profile:get-dashboard', async (_, userId: number) => {
+    const sessions = await prisma.gameSession.findMany({
+      where: {
+        appUserId: userId
+      },
+      select: {
+        id: true,
+        startedAt: true,
+        endedAt: true,
+        durationMinutes: true,
+        game: {
+          select: {
+            title: true
+          }
+        }
+      },
+      orderBy: {
+        startedAt: 'desc'
+      }
+    });
+
+    const normalizedSessions = sessions.map((session) => ({
+      id: session.id,
+      gameTitle: session.game.title,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      durationMinutes:
+        session.durationMinutes ??
+        computeSessionDurationMinutes(session.startedAt, session.endedAt ?? new Date())
+    }));
+
+    const totalMinutes = normalizedSessions.reduce(
+      (sum, session) => sum + session.durationMinutes,
+      0
+    );
+    const averageMinutes = normalizedSessions.length
+      ? Math.round(totalMinutes / normalizedSessions.length)
+      : 0;
+
+    const now = new Date();
+    const activityMap = new Map<string, number>();
+    for (let index = 11; index >= 0; index -= 1) {
+      const day = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - index)
+      );
+      activityMap.set(formatUtcDateLabel(day), 0);
+    }
+
+    for (const session of normalizedSessions) {
+      const label = formatUtcDateLabel(session.startedAt);
+      if (!activityMap.has(label)) {
+        continue;
+      }
+      activityMap.set(label, (activityMap.get(label) || 0) + session.durationMinutes);
+    }
+
+    const durationBuckets = [
+      { label: '0-60 min', count: 0 },
+      { label: '61-120 min', count: 0 },
+      { label: '121-180 min', count: 0 },
+      { label: '180+ min', count: 0 }
+    ];
+
+    for (const session of normalizedSessions) {
+      if (session.durationMinutes <= 60) {
+        durationBuckets[0].count += 1;
+      } else if (session.durationMinutes <= 120) {
+        durationBuckets[1].count += 1;
+      } else if (session.durationMinutes <= 180) {
+        durationBuckets[2].count += 1;
+      } else {
+        durationBuckets[3].count += 1;
+      }
+    }
+
+    const gameMap = new Map<string, { sessions: number; totalMinutes: number }>();
+    for (const session of normalizedSessions) {
+      const current = gameMap.get(session.gameTitle) ?? { sessions: 0, totalMinutes: 0 };
+      current.sessions += 1;
+      current.totalMinutes += session.durationMinutes;
+      gameMap.set(session.gameTitle, current);
+    }
+
+    const byGame = [...gameMap.entries()]
+      .map(([gameTitle, values]) => ({
+        gameTitle,
+        sessions: values.sessions,
+        totalMinutes: values.totalMinutes,
+        averageMinutes: values.sessions ? Math.round(values.totalMinutes / values.sessions) : 0
+      }))
+      .sort((left, right) => right.sessions - left.sessions);
+
+    return {
+      sessions: normalizedSessions.length,
+      totalMinutes,
+      averageMinutes,
+      recentActivity: [...activityMap.entries()].map(([label, minutes]) => ({ label, minutes })),
+      durationBuckets,
+      byGame,
+      sessionHistory: normalizedSessions.slice(0, 12).map((session) => ({
+        id: session.id,
+        gameTitle: session.gameTitle,
+        startedAt: session.startedAt.toISOString(),
+        endedAt: session.endedAt?.toISOString(),
+        durationMinutes: session.durationMinutes
+      }))
+    };
+  });
+
+  ipcMain.handle('admin:get-rbac-summary', async () => {
+    const [roles, permissions] = await Promise.all([
+      prisma.role.findMany({
+        include: {
+          users: {
+            select: {
+              id: true
+            }
+          },
+          permissions: {
+            select: {
+              action: true
+            }
+          }
+        },
+        orderBy: {
+          id: 'asc'
+        }
+      }),
+      prisma.permission.findMany({
+        include: {
+          roles: {
+            select: {
+              name: true
+            }
+          }
+        },
+        orderBy: {
+          id: 'asc'
+        }
+      })
+    ]);
+
+    return {
+      rolesCount: roles.length,
+      permissionsCount: permissions.length,
+      roles: roles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        usersCount: role.users.length,
+        permissions: role.permissions.map((permission) => permission.action)
+      })),
+      permissions: permissions.map((permission) => ({
+        id: permission.id,
+        action: permission.action,
+        description: permission.description ?? undefined,
+        usedInRoles: permission.roles.map((role) => role.name)
+      }))
+    };
   });
 });
 
