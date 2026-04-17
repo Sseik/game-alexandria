@@ -5,7 +5,8 @@ import {
   Game,
   LibraryPlatform,
   ProfileDashboard,
-  RecentSessionGame
+  RecentSessionGame,
+  User
 } from 'src/shared/types';
 
 declare global {
@@ -15,6 +16,7 @@ declare global {
       getGames: () => Promise<Game[]>;
       getGameDetails: (gameId: string) => Promise<Game | null>;
       login: ({ email: string, password: string }) => Promise<Credentials>;
+      getUser: (userId: number) => Promise<User | null>;
       setActiveRemoteUser: (userId: number) => Promise<{ success: boolean }>;
       clearActiveRemoteUser: () => Promise<{ success: boolean }>;
       getLibrary: (userId: number) => Promise<Game[]>;

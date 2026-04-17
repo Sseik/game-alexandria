@@ -7,6 +7,7 @@ const api = {
   getGames: () => ipcRenderer.invoke('get-games'),
   getGameDetails: (gameId: string) => ipcRenderer.invoke('get-game-details', gameId),
   login: (credentials: Credentials) => ipcRenderer.invoke('auth:login', credentials),
+  getUser: (userId: number) => ipcRenderer.invoke('auth:get-user', userId),
   setActiveRemoteUser: (userId: number) => ipcRenderer.invoke('auth:set-active-user', userId),
   clearActiveRemoteUser: () => ipcRenderer.invoke('auth:clear-active-user'),
   getLibrary: (userId: number) => ipcRenderer.invoke('get-library', userId),

@@ -16,7 +16,7 @@ function formatDuration(totalMinutes: number): string {
 
 function ProfilePage(): React.JSX.Element {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, isLoading } = useAuth();
   const [activeTab, setActiveTab] = useState<ProfileTab>('overview');
   const [dashboard, setDashboard] = useState<ProfileDashboard | null>(null);
 
@@ -26,6 +26,10 @@ function ProfilePage(): React.JSX.Element {
   };
 
   useEffect(() => {
+    if (isLoading) {
+      return;
+    }
+
     if (!user) {
       navigate('/login');
       return;
@@ -45,10 +49,10 @@ function ProfilePage(): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [navigate, user]);
+  }, [isLoading, navigate, user]);
 
   useEffect(() => {
-    if (!user) {
+    if (isLoading || !user) {
       return;
     }
 
@@ -63,10 +67,10 @@ function ProfilePage(): React.JSX.Element {
       unsubscribe();
       window.removeEventListener('focus', refreshProfile);
     };
-  }, [user]);
+  }, [isLoading, user]);
 
   useEffect(() => {
-    if (!user || activeTab !== 'sessions') {
+    if (isLoading || !user || activeTab !== 'sessions') {
       return;
     }
 
@@ -77,7 +81,7 @@ function ProfilePage(): React.JSX.Element {
     return () => {
       clearInterval(interval);
     };
-  }, [activeTab, user]);
+  }, [activeTab, isLoading, user]);
 
   const topGames = useMemo(() => {
     if (!dashboard?.byGame?.length) {

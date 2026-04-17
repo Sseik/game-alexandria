@@ -1,10 +1,102 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../src/generated/prisma/client';
 import bcrypt from 'bcrypt';
 
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+const currentDir = dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: resolve(currentDir, '..', '.env') });
+
+const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL;
+const IGDB_CLIENT_ID = process.env.IGDB_CLIENT_ID;
+const IGDB_CLIENT_SECRET = process.env.IGDB_CLIENT_SECRET;
+const IGDB_TOKEN_URL = 'https://id.twitch.tv/oauth2/token';
+const IGDB_API_BASE = 'https://api.igdb.com/v4';
+
+type IgdbGame = {
+  name?: string;
+  cover?: { image_id?: string | null } | number | null;
+};
+
+if (!connectionString) {
+  throw new Error('DATABASE_URL or DIRECT_URL is required for seeding');
+}
+
+const adapter = new PrismaPg({ connectionString });
 const prisma = new PrismaClient({ adapter });
+
+let igdbAccessToken: string | null = null;
+let igdbAccessTokenExpiry = 0;
+
+function normalizeTitle(title: string) {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function buildIgdbImageUrl(imageId: string) {
+  return `https://images.igdb.com/igdb/image/upload/t_cover_big/${imageId}.jpg`;
+}
+
+async function getIgdbAccessToken(): Promise<string> {
+  if (igdbAccessToken && Date.now() < igdbAccessTokenExpiry) {
+    return igdbAccessToken;
+  }
+
+  if (!IGDB_CLIENT_ID || !IGDB_CLIENT_SECRET) {
+    throw new Error('Missing IGDB credentials');
+  }
+
+  const response = await fetch(
+    `${IGDB_TOKEN_URL}?client_id=${encodeURIComponent(IGDB_CLIENT_ID)}&client_secret=${encodeURIComponent(IGDB_CLIENT_SECRET)}&grant_type=client_credentials`,
+    { method: 'POST' }
+  );
+
+  if (!response.ok) {
+    throw new Error(`IGDB auth failed: ${response.status}`);
+  }
+
+  const data = (await response.json()) as { access_token: string; expires_in: number };
+  igdbAccessToken = data.access_token;
+  igdbAccessTokenExpiry = Date.now() + Math.max(0, data.expires_in - 60) * 1000;
+  return igdbAccessToken;
+}
+
+async function igdbFetch(body: string): Promise<IgdbGame[]> {
+  const token = await getIgdbAccessToken();
+  const response = await fetch(`${IGDB_API_BASE}/games`, {
+    method: 'POST',
+    headers: {
+      'Client-ID': IGDB_CLIENT_ID ?? '',
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+      'Content-Type': 'text/plain'
+    },
+    body
+  });
+
+  if (!response.ok) {
+    throw new Error(`IGDB request failed: ${response.status}`);
+  }
+
+  return (await response.json()) as IgdbGame[];
+}
+
+async function resolveCoverUrl(title: string): Promise<string | null> {
+  const results = await igdbFetch(
+    `search "${title.replace(/"/g, '\\"')}"; fields name,cover.image_id; limit 5;`
+  );
+
+  const sourceTitle = normalizeTitle(title);
+  const bestMatch =
+    results.find((game) => normalizeTitle(game.name || '') === sourceTitle) || results[0];
+  const imageId =
+    bestMatch?.cover && typeof bestMatch.cover === 'object' ? bestMatch.cover.image_id : null;
+
+  return imageId ? buildIgdbImageUrl(imageId) : null;
+}
 
 async function main() {
   console.log('⏳ Починаємо повний reset та генерацію тестових даних...');
@@ -85,34 +177,34 @@ async function main() {
 
   // 4) Rich game catalog.
   const gamesSeed = [
-    ['Fallout 3', 'Post-apocalyptic open-world RPG in the Capital Wasteland.', null],
-    ["Don't Starve Together", 'Co-op survival in a strange and unforgiving world.', null],
-    ['Stardew Valley', 'Farm life sim with exploration and relationships.', null],
-    ['Darkest Dungeon', 'Roguelike dungeon crawler with psychological themes.', null],
-    ['Terraria', 'Sandbox action-adventure with crafting and bosses.', null],
-    ['Factorio', 'Automation and factory optimization sandbox.', null],
-    ['The Witcher: Enhanced Edition', 'Origins of the Witcher saga.', null],
-    ['Undertale', 'Indie RPG with unique battle system.', null],
-    ['Phoenix Wright: Ace Attorney Trilogy', 'Classic courtroom adventure trilogy.', null],
-    ['Octopath Traveler', 'Turn-based RPG with multiple interweaving stories.', null],
-    ['Fallout 1', 'Classic post-apocalyptic RPG.', null],
-    ['Disco Elysium', 'Narrative detective RPG with deep dialogue systems.', null],
+    ['Fallout 3', 'Post-apocalyptic open-world RPG in the Capital Wasteland.'],
+    ["Don't Starve Together", 'Co-op survival in a strange and unforgiving world.'],
+    ['Stardew Valley', 'Farm life sim with exploration and relationships.'],
+    ['Darkest Dungeon', 'Roguelike dungeon crawler with psychological themes.'],
+    ['Terraria', 'Sandbox action-adventure with crafting and bosses.'],
+    ['Factorio', 'Automation and factory optimization sandbox.'],
+    ['The Witcher: Enhanced Edition', 'Origins of the Witcher saga.'],
+    ['Undertale', 'Indie RPG with unique battle system.'],
+    ['Phoenix Wright: Ace Attorney Trilogy', 'Classic courtroom adventure trilogy.'],
+    ['Octopath Traveler', 'Turn-based RPG with multiple interweaving stories.'],
+    ['Fallout 1', 'Classic post-apocalyptic RPG.'],
+    ['Disco Elysium', 'Narrative detective RPG with deep dialogue systems.'],
     [
       'S.T.A.L.K.E.R.: Shadow of Chornobyl',
-      'Post-apocalyptic FPS set in Chornobyl Exclusion Zone.',
-      null
+      'Post-apocalyptic FPS set in Chornobyl Exclusion Zone.'
     ],
-    ['The Elder Scrolls V: Skyrim Special Edition', 'Epic fantasy RPG in a vast open world.', null],
-    ['Risk of Rain 1', 'Roguelike third-person shooter.', null]
+    ['The Elder Scrolls V: Skyrim Special Edition', 'Epic fantasy RPG in a vast open world.'],
+    ['Risk of Rain 1', 'Roguelike third-person shooter.']
   ] as const;
 
   const gameRows = await Promise.all(
-    gamesSeed.map(([title, description, igdbId]) =>
+    gamesSeed.map(async ([title, description]) =>
       prisma.game.create({
         data: {
           title,
           description,
-          igdbId
+          coverUrl: await resolveCoverUrl(title),
+          igdbId: null
         }
       })
     )
@@ -135,32 +227,34 @@ async function main() {
     }
   });
 
-  const users = await Promise.all([
-    prisma.user.create({
-      data: {
-        username: 'alex',
-        email: 'alex@example.com',
-        passwordHash: userPassword,
-        roleId: userRole.id
-      }
-    }),
-    prisma.user.create({
-      data: {
-        username: 'maria',
-        email: 'maria@example.com',
-        passwordHash: userPassword,
-        roleId: userRole.id
-      }
-    }),
-    prisma.user.create({
-      data: {
-        username: 'dmytro',
-        email: 'dmytro@example.com',
-        passwordHash: userPassword,
-        roleId: userRole.id
-      }
-    })
-  ]);
+  const alexUser = await prisma.user.create({
+    data: {
+      username: 'alex',
+      email: 'alex@example.com',
+      passwordHash: userPassword,
+      roleId: userRole.id
+    }
+  });
+
+  const mariaUser = await prisma.user.create({
+    data: {
+      username: 'maria',
+      email: 'maria@example.com',
+      passwordHash: userPassword,
+      roleId: userRole.id
+    }
+  });
+
+  const dmytroUser = await prisma.user.create({
+    data: {
+      username: 'dmytro',
+      email: 'dmytro@example.com',
+      passwordHash: userPassword,
+      roleId: userRole.id
+    }
+  });
+
+  const users = [alexUser, mariaUser, dmytroUser];
 
   // 6) Libraries with user's actual games.
   const steam = platformByName.get('Steam')!;

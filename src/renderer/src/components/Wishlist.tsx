@@ -7,7 +7,7 @@ import { shouldRetryVisibleIgdbMetadata } from '../shared/igdbRefresh';
 
 function Wishlist(): React.JSX.Element {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, isLoading } = useAuth();
   const [games, setGames] = useState<Game[]>([]);
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState<'recent' | 'price-low' | 'price-high'>('recent');
@@ -19,11 +19,15 @@ function Wishlist(): React.JSX.Element {
   };
 
   useEffect(() => {
+    if (isLoading) {
+      return;
+    }
+
     user ? loadWishlist(user.id) : navigate('/login');
-  }, [navigate, user]);
+  }, [isLoading, navigate, user]);
 
   useEffect(() => {
-    if (!user) {
+    if (isLoading || !user) {
       return;
     }
 
@@ -32,7 +36,7 @@ function Wishlist(): React.JSX.Element {
     };
 
     return subscribeToAppEvents([APP_EVENTS.WISHLIST_UPDATED], refreshWishlist);
-  }, [user]);
+  }, [isLoading, user]);
 
   const filteredGames = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -58,7 +62,11 @@ function Wishlist(): React.JSX.Element {
   const totalTargetPrice = filteredGames.reduce((sum, game) => sum + (game.targetPrice ?? 0), 0);
 
   useEffect(() => {
-    if (!user || !shouldRetryVisibleIgdbMetadata(filteredGames, lastVisibleIgdbRetryAt.current)) {
+    if (
+      isLoading ||
+      !user ||
+      !shouldRetryVisibleIgdbMetadata(filteredGames, lastVisibleIgdbRetryAt.current)
+    ) {
       return;
     }
 
@@ -70,10 +78,10 @@ function Wishlist(): React.JSX.Element {
     return () => {
       clearTimeout(timer);
     };
-  }, [filteredGames, user]);
+  }, [filteredGames, isLoading, user]);
 
   const handleRemove = async (gameId: string) => {
-    if (!user) {
+    if (isLoading || !user) {
       navigate('/login');
       return;
     }

@@ -72,10 +72,17 @@ type IgdbCacheEntry = {
   expiresAt: number;
 };
 
+type GameDetailsCacheEntry = {
+  value: unknown;
+  expiresAt: number;
+};
+
 const IGDB_SUCCESS_CACHE_MS = 6 * 60 * 60 * 1000;
 const IGDB_FAILURE_CACHE_MS = 45 * 1000;
 const IGDB_INFLIGHT_CACHE_MS = 30 * 1000;
+const GAME_DETAILS_CACHE_MS = 10 * 60 * 1000;
 const igdbGameCache = new Map<string, IgdbCacheEntry>();
+const gameDetailsCache = new Map<string, GameDetailsCacheEntry>();
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -498,6 +505,24 @@ async function enrichGame(game: GameRecord) {
     igdbId: game.igdbId,
     platforms: media?.platforms ?? [],
     platformLinks: media?.platformLinks ?? []
+  };
+}
+
+function toBasicGamePayload(game: GameRecord) {
+  return {
+    id: String(game.id),
+    title: game.title,
+    description: game.description ?? undefined,
+    coverUrl: toHttpsUrl(game.coverUrl),
+    logoUrl: undefined,
+    screenshots: [],
+    videos: [],
+    score: null,
+    platformId: '',
+    path: undefined,
+    igdbId: game.igdbId,
+    platforms: [],
+    platformLinks: []
   };
 }
 
@@ -1171,20 +1196,50 @@ app.whenReady().then(async () => {
       }
     });
 
-    const enrichedGames = await Promise.all(games.map((game) => enrichGame(game)));
-    const orderedByScore = [...enrichedGames].sort((a, b) => {
-      const left = typeof a.score === 'number' ? a.score : -1;
-      const right = typeof b.score === 'number' ? b.score : -1;
-      return right - left;
-    });
+    return games.map((game) => toBasicGamePayload(game));
+  });
 
-    return orderedByScore.map((game) => ({
-      ...game,
-      platformId: ''
-    }));
+  ipcMain.handle('dev:seed-covers', async () => {
+    const covers: Record<string, string> = {
+      'Fallout 3': 'https://images.igdb.com/igdb/image/upload/t_cover_big/co2ibb.jpg',
+      "Don't Starve Together": 'https://images.igdb.com/igdb/image/upload/t_cover_big/co1iq5.jpg',
+      'Stardew Valley': 'https://images.igdb.com/igdb/image/upload/t_cover_big/co1r67.jpg',
+      'Darkest Dungeon': 'https://images.igdb.com/igdb/image/upload/t_cover_big/co1s0l.jpg',
+      Terraria: 'https://images.igdb.com/igdb/image/upload/t_cover_big/co1vyz.jpg',
+      Factorio: 'https://images.igdb.com/igdb/image/upload/t_cover_big/co1s34.jpg',
+      'The Witcher: Enhanced Edition':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co1r3o.jpg',
+      Undertale: 'https://images.igdb.com/igdb/image/upload/t_cover_big/co1s8h.jpg',
+      'Phoenix Wright: Ace Attorney Trilogy':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co1rby.jpg',
+      'Octopath Traveler': 'https://images.igdb.com/igdb/image/upload/t_cover_big/co1t4h.jpg',
+      'Fallout 1': 'https://images.igdb.com/igdb/image/upload/t_cover_big/co2ib8.jpg',
+      'Disco Elysium': 'https://images.igdb.com/igdb/image/upload/t_cover_big/co1s29.jpg',
+      'S.T.A.L.K.E.R.: Shadow of Chornobyl':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co1rn8.jpg',
+      'The Elder Scrolls V: Skyrim Special Edition':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co1t4c.jpg',
+      'Risk of Rain 1': 'https://images.igdb.com/igdb/image/upload/t_cover_big/co1sao.jpg'
+    };
+
+    const updated = await Promise.all(
+      Object.entries(covers).map(([title, coverUrl]) =>
+        prisma.game.updateMany({
+          where: { title },
+          data: { coverUrl }
+        })
+      )
+    );
+
+    return { success: true, updated: updated.length };
   });
 
   ipcMain.handle('get-game-details', async (_, gameId: string) => {
+    const cached = gameDetailsCache.get(gameId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
+
     const game = await prisma.game.findUnique({
       where: { id: Number(gameId) },
       select: {
@@ -1252,13 +1307,20 @@ app.whenReady().then(async () => {
         }
       : undefined;
 
-    return {
+    const detailedPayload = {
       ...enrichedGame,
       platformId: '',
       platforms: platformNames,
       priceHistory,
       priceStats
     };
+
+    gameDetailsCache.set(gameId, {
+      value: detailedPayload,
+      expiresAt: Date.now() + GAME_DETAILS_CACHE_MS
+    });
+
+    return detailedPayload;
   });
 
   ipcMain.handle('auth:login', async (_, { email, password }) => {
@@ -1289,6 +1351,20 @@ app.whenReady().then(async () => {
 
     activeRemoteUserEmail = user?.email ?? null;
     return { success: true };
+  });
+
+  ipcMain.handle('auth:get-user', async (_, userId: number) => {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { role: true }
+    });
+
+    if (!user) {
+      return null;
+    }
+
+    const { passwordHash, ...safeUser } = user;
+    return safeUser;
   });
 
   ipcMain.handle('auth:clear-active-user', async () => {
@@ -1323,28 +1399,24 @@ app.whenReady().then(async () => {
       }
     });
 
-    const enrichedGames = await Promise.all(
-      games.map(async (item) => {
-        const media = await resolveIgdbMedia(item.game);
-        const coverUrl = toHttpsUrl(media?.coverUrl || media?.logoUrl || item.game.coverUrl);
-        const logoUrl = toHttpsUrl(media?.logoUrl || media?.coverUrl || item.game.coverUrl);
-
-        return {
-          libraryEntryId: String(item.id),
-          id: String(item.game.id),
-          title: media?.name || item.game.title,
-          coverUrl,
-          logoUrl: logoUrl || undefined,
-          description: media?.summary ?? item.game.description ?? undefined,
-          executablePath: item.executablePath,
-          platformId: String(item.platform.id),
-          platformName: item.platform.name,
-          platforms: media?.platforms ?? [],
-          platformLinks: media?.platformLinks ?? [],
-          igdbId: item.game.igdbId
-        };
-      })
-    );
+    const enrichedGames = games.map((item) => ({
+      libraryEntryId: String(item.id),
+      id: String(item.game.id),
+      title: item.game.title,
+      coverUrl: toHttpsUrl(item.game.coverUrl),
+      logoUrl: undefined,
+      description: item.game.description ?? undefined,
+      executablePath: item.executablePath,
+      platformId: String(item.platform.id),
+      platformName: item.platform.name,
+      platforms: [],
+      platformLinks: [],
+      igdbId: item.game.igdbId,
+      score: null,
+      screenshots: [],
+      videos: [],
+      path: undefined
+    }));
 
     return enrichedGames;
   });
@@ -1373,18 +1445,11 @@ app.whenReady().then(async () => {
       }
     });
 
-    const enrichedGames = await Promise.all(
-      wishlistItems.map(async (item) => {
-        const enriched = await enrichGame(item.game);
-
-        return {
-          ...enriched,
-          platformId: '',
-          targetPrice: item.targetPrice ? Number(item.targetPrice) : null,
-          addedAt: item.addedAt?.toISOString()
-        };
-      })
-    );
+    const enrichedGames = wishlistItems.map((item) => ({
+      ...toBasicGamePayload(item.game),
+      targetPrice: item.targetPrice ? Number(item.targetPrice) : null,
+      addedAt: item.addedAt?.toISOString()
+    }));
 
     return enrichedGames;
   });
@@ -1719,32 +1784,29 @@ app.whenReady().then(async () => {
 
     const launchableGames = await Promise.all(
       [...dedupedByGame.values()].slice(0, limit).map(async (entry) => {
-        const [media, libraryEntry] = await Promise.all([
-          resolveIgdbMedia(entry.game),
-          prisma.userLibrary.findFirst({
-            where: {
-              appUserId: userId,
-              gameId: entry.game.id
-            },
-            orderBy: {
-              addedAt: 'desc'
-            },
-            select: {
-              platformId: true,
-              executablePath: true,
-              platform: {
-                select: {
-                  name: true
-                }
+        const libraryEntry = await prisma.userLibrary.findFirst({
+          where: {
+            appUserId: userId,
+            gameId: entry.game.id
+          },
+          orderBy: {
+            addedAt: 'desc'
+          },
+          select: {
+            platformId: true,
+            executablePath: true,
+            platform: {
+              select: {
+                name: true
               }
             }
-          })
-        ]);
+          }
+        });
 
         return {
           gameId: String(entry.game.id),
-          title: media?.name || entry.game.title,
-          image: toHttpsUrl(media?.coverUrl || media?.logoUrl || entry.game.coverUrl),
+          title: entry.game.title,
+          image: toHttpsUrl(entry.game.coverUrl),
           platformId: libraryEntry?.platformId ? String(libraryEntry.platformId) : undefined,
           platformName: libraryEntry?.platform.name,
           canLaunch: Boolean(libraryEntry?.executablePath),

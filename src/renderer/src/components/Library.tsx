@@ -12,7 +12,7 @@ type SortOption = 'recent' | 'az' | 'za';
 
 function Library() {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, isLoading } = useAuth();
   const [games, setGames] = useState<Game[]>([]);
   const [sortBy, setSortBy] = useState<SortOption>('recent');
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
@@ -34,11 +34,15 @@ function Library() {
   };
 
   useEffect(() => {
+    if (isLoading) {
+      return;
+    }
+
     user ? loadData(user.id) : navigate('/login');
-  }, [navigate, user]);
+  }, [isLoading, navigate, user]);
 
   useEffect(() => {
-    if (!user) {
+    if (isLoading || !user) {
       return;
     }
 
@@ -50,7 +54,7 @@ function Library() {
       [APP_EVENTS.LIBRARY_UPDATED, APP_EVENTS.SESSION_UPDATED],
       refreshLibrary
     );
-  }, [user]);
+  }, [isLoading, user]);
 
   const availablePlatforms = useMemo(() => {
     const byId = new Map<string, string>();
@@ -101,7 +105,11 @@ function Library() {
   }, [totalPages]);
 
   useEffect(() => {
-    if (!user || !shouldRetryVisibleIgdbMetadata(pageGames, lastVisibleIgdbRetryAt.current)) {
+    if (
+      isLoading ||
+      !user ||
+      !shouldRetryVisibleIgdbMetadata(pageGames, lastVisibleIgdbRetryAt.current)
+    ) {
       return;
     }
 
@@ -113,7 +121,7 @@ function Library() {
     return () => {
       clearTimeout(timer);
     };
-  }, [pageGames, user]);
+  }, [isLoading, pageGames, user]);
 
   const pageNumbers = useMemo(() => {
     return Array.from({ length: totalPages }, (_, index) => index + 1);

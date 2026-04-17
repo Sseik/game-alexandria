@@ -116,7 +116,7 @@ function Header(): React.JSX.Element {
             </div>
           )}
         </div>
-      ) : (
+      ) : location.pathname === '/login' || location.pathname === '/register' ? null : (
         <div className="auth-nav" aria-label="Authentication navigation">
           <span
             className={`auth-nav-pill ${location.pathname === '/register' ? 'register' : 'login'}`}
