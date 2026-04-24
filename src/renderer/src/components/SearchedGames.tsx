@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Game } from '../../../shared/types';
+import { Game, IgdbImportCandidate } from '../../../shared/types';
 import { useAuth } from '@renderer/context/AuthContext';
 import GamesGrid from './GamesGrid';
 import { shouldRetryVisibleIgdbMetadata } from '../shared/igdbRefresh';
@@ -16,9 +16,14 @@ function SearchedGames() {
   const [sortBy, setSortBy] = useState<SortOption>('relevance');
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
+  const [igdbGames, setIgdbGames] = useState<IgdbImportCandidate[]>([]);
+  const [igdbLoading, setIgdbLoading] = useState(false);
+  const [igdbError, setIgdbError] = useState<string | null>(null);
+  const [importingGameId, setImportingGameId] = useState<number | null>(null);
   const lastVisibleIgdbRetryAt = useRef(0);
 
   const query = (searchParams.get('q') || '').trim();
+  const canImportGames = Boolean(user?.role?.permissions?.includes('games.write'));
 
   const loadGames = async () => {
     const fetchedGames = await window.api.getGames();
@@ -28,6 +33,44 @@ function SearchedGames() {
   useEffect(() => {
     user ? loadGames() : navigate('/login');
   }, [navigate, user]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadIgdbResults = async () => {
+      if (!query || !canImportGames) {
+        setIgdbGames([]);
+        setIgdbError(null);
+        setIgdbLoading(false);
+        return;
+      }
+
+      setIgdbLoading(true);
+      setIgdbError(null);
+
+      try {
+        const results = await window.api.searchIgdbGames(query);
+        if (!cancelled) {
+          setIgdbGames(results);
+        }
+      } catch {
+        if (!cancelled) {
+          setIgdbError('Unable to load IGDB results right now.');
+          setIgdbGames([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setIgdbLoading(false);
+        }
+      }
+    };
+
+    void loadIgdbResults();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [canImportGames, query]);
 
   const availablePlatforms = useMemo(() => {
     const byId = new Map<string, string>();
@@ -89,6 +132,28 @@ function SearchedGames() {
         ? current.filter((id) => id !== platformId)
         : [...current, platformId]
     );
+  };
+
+  const handleImportGame = async (candidate: IgdbImportCandidate) => {
+    if (!user) {
+      navigate('/login');
+      return;
+    }
+
+    setImportingGameId(candidate.igdbId);
+    setIgdbError(null);
+
+    const result = await window.api.importIgdbGame(user.id, candidate.igdbId);
+
+    if (!result.success || !result.game) {
+      setIgdbError(result.error || 'Unable to import this game.');
+      setImportingGameId(null);
+      return;
+    }
+
+    setImportingGameId(null);
+    await loadGames();
+    navigate(`/game/${result.game.id}`, { state: { game: result.game } });
   };
 
   useEffect(() => {
@@ -157,6 +222,74 @@ function SearchedGames() {
           ) : (
             <p className="empty-state">No games found for this search.</p>
           )}
+
+          {query && canImportGames ? (
+            <section className="igdb-import-panel">
+              <div className="igdb-import-head">
+                <h3>Import from IGDB</h3>
+                <p>
+                  Add new games to your local catalog, then they become available in the normal
+                  library and search views.
+                </p>
+              </div>
+
+              {igdbLoading ? <p className="empty-state">Searching IGDB...</p> : null}
+              {igdbError ? <p className="empty-state">{igdbError}</p> : null}
+
+              {!igdbLoading && !igdbError && igdbGames.length ? (
+                <div className="igdb-import-grid">
+                  {igdbGames.map((candidate) => (
+                    <article key={candidate.igdbId} className="igdb-import-card">
+                      <div className="igdb-import-cover">
+                        {candidate.coverUrl ? (
+                          <img src={candidate.coverUrl} alt={`${candidate.title} cover`} />
+                        ) : null}
+                      </div>
+                      <div className="igdb-import-content">
+                        <div>
+                          <h4>{candidate.title}</h4>
+                          <p>{candidate.description || 'No description available.'}</p>
+                        </div>
+                        <div className="igdb-import-actions">
+                          {candidate.inDatabase ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                candidate.gameId && navigate(`/game/${candidate.gameId}`)
+                              }
+                            >
+                              Open Game
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleImportGame(candidate)}
+                              disabled={importingGameId === candidate.igdbId}
+                            >
+                              {importingGameId === candidate.igdbId ? 'Importing...' : 'Import'}
+                            </button>
+                          )}
+                          {candidate.score ? (
+                            <span>Rating {Math.round(candidate.score)}</span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
+
+              {!igdbLoading && !igdbError && !igdbGames.length ? (
+                <p className="empty-state">No IGDB matches found for this query.</p>
+              ) : null}
+            </section>
+          ) : null}
+
+          {query && !canImportGames ? (
+            <p className="empty-state">
+              You can search the local catalog, but IGDB import requires the games.write permission.
+            </p>
+          ) : null}
         </div>
 
         <aside className="catalog-filters" aria-label="Search filters">

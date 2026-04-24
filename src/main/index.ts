@@ -1,8 +1,9 @@
 import 'dotenv/config';
 import { app, shell, BrowserWindow, ipcMain } from 'electron';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { spawn } from 'child_process';
 import { promisify } from 'util';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
 import icon from '../../resources/icon.png?asset';
 import { PrismaClient } from '../generated/prisma/client';
@@ -17,6 +18,20 @@ type GameRecord = {
   description: string | null;
   coverUrl: string | null;
   igdbId: number | null;
+};
+
+type AppUserWithPermissions = {
+  id: number;
+  username: string;
+  email: string;
+  passwordHash: string;
+  roleId: number;
+  createdAt: Date | null;
+  role?: {
+    id: number;
+    name: string;
+    permissions: Array<{ action: string }>;
+  } | null;
 };
 
 type IgdbGame = {
@@ -44,6 +59,24 @@ type ResolvedIgdbMedia = {
   score?: number | null;
   platforms?: string[];
   platformLinks?: Array<{ platform: string; url: string; launchUrl?: string; category?: number }>;
+};
+
+type IgdbImportCandidate = {
+  igdbId: number;
+  title: string;
+  description?: string;
+  coverUrl?: string;
+  score?: number | null;
+  inDatabase: boolean;
+  gameId?: string;
+};
+
+type AuditLogEntry = {
+  actorEmail: string;
+  action: string;
+  targetType: 'user' | 'role' | 'permission' | 'rbac' | 'game';
+  targetId?: string;
+  details?: string;
 };
 
 const IGDB_TITLE_ID_FALLBACKS: Record<string, number> = {
@@ -287,6 +320,174 @@ async function igdbFetch(endpoint: string, body: string): Promise<IgdbGame[]> {
   }
 
   return (await response.json()) as IgdbGame[];
+}
+
+async function appendAuditLogEntry(params: AuditLogEntry) {
+  const entry = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    actorEmail: params.actorEmail,
+    action: params.action,
+    targetType: params.targetType,
+    targetId: params.targetId,
+    details: params.details,
+    createdAt: new Date().toISOString()
+  };
+
+  const auditPath = join(app.getPath('userData'), 'admin-audit.log');
+  await mkdir(dirname(auditPath), { recursive: true });
+  await appendFile(auditPath, `${JSON.stringify(entry)}\n`, 'utf8');
+}
+
+async function loadUserWithPermissions(userId: number): Promise<AppUserWithPermissions | null> {
+  return prisma.user.findUnique({
+    where: { id: userId },
+    include: {
+      role: {
+        include: {
+          permissions: {
+            select: { action: true }
+          }
+        }
+      }
+    }
+  });
+}
+
+function actorHasPermission(
+  actor: AppUserWithPermissions | null | undefined,
+  action: string
+): boolean {
+  return Boolean(actor?.role?.permissions.some((permission) => permission.action === action));
+}
+
+async function searchIgdbGames(query: string): Promise<IgdbImportCandidate[]> {
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const results = await igdbFetch(
+    '/games',
+    `search "${escapeIgdbQuery(normalizedQuery)}"; fields name,summary,cover.image_id,total_rating,rating; limit 10;`
+  );
+
+  const ids = results.map((game) => game.id);
+  const existingGames = await prisma.game.findMany({
+    where: {
+      OR: [{ igdbId: { in: ids } }, { title: { in: results.map((game) => game.name || '') } }]
+    },
+    select: { id: true, title: true, igdbId: true }
+  });
+
+  const existingByIgdbId = new Map(
+    existingGames.filter((game) => game.igdbId).map((game) => [game.igdbId as number, game])
+  );
+  const existingByTitle = new Map(existingGames.map((game) => [normalizeTitle(game.title), game]));
+
+  return results.flatMap((game) => {
+    const title = game.name?.trim();
+    if (!title) {
+      return [];
+    }
+
+    const coverImageId = extractImageId(game.cover);
+    const matchedGame = existingByIgdbId.get(game.id) ?? existingByTitle.get(normalizeTitle(title));
+
+    return [
+      {
+        igdbId: game.id,
+        title,
+        description: game.summary?.trim() || undefined,
+        coverUrl: coverImageId ? buildIgdbImageUrl(coverImageId, 't_cover_big') : undefined,
+        score: game.total_rating ?? game.rating ?? null,
+        inDatabase: Boolean(matchedGame),
+        gameId: matchedGame ? String(matchedGame.id) : undefined
+      }
+    ];
+  });
+}
+
+async function importIgdbGameToDatabase(userId: number, igdbId: number) {
+  const actor = await loadUserWithPermissions(userId);
+
+  if (!actor) {
+    return { success: false, created: false, error: 'User not found' };
+  }
+
+  if (!actorHasPermission(actor, 'games.write')) {
+    return { success: false, created: false, error: 'Missing permission: games.write' };
+  }
+
+  const [igdbGame] = await igdbFetch(
+    '/games',
+    `where id = ${igdbId}; fields name,summary,cover.image_id; limit 1;`
+  );
+
+  if (!igdbGame?.name?.trim()) {
+    return { success: false, created: false, error: 'IGDB game not found' };
+  }
+
+  const title = igdbGame.name.trim();
+  const description = igdbGame.summary?.trim() || null;
+  const coverImageId = extractImageId(igdbGame.cover);
+  const coverUrl = coverImageId ? buildIgdbImageUrl(coverImageId, 't_cover_big') : null;
+
+  const existingGame = await prisma.game.findFirst({
+    where: {
+      OR: [{ igdbId }, { title: { equals: title, mode: 'insensitive' } }]
+    }
+  });
+
+  const savedGame = existingGame
+    ? await prisma.game.update({
+        where: { id: existingGame.id },
+        data: {
+          title,
+          description,
+          coverUrl: coverUrl ?? existingGame.coverUrl,
+          igdbId,
+          isCustom: false,
+          addedByUserId: actor.id
+        },
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          coverUrl: true,
+          igdbId: true
+        }
+      })
+    : await prisma.game.create({
+        data: {
+          title,
+          description,
+          coverUrl,
+          igdbId,
+          isCustom: false,
+          addedByUserId: actor.id
+        },
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          coverUrl: true,
+          igdbId: true
+        }
+      });
+
+  await appendAuditLogEntry({
+    actorEmail: actor.email,
+    action: existingGame ? 'import-game-from-igdb-update' : 'import-game-from-igdb-create',
+    targetType: 'game',
+    targetId: String(savedGame.id),
+    details: `${title} (IGDB ${igdbId})`
+  });
+
+  return {
+    success: true,
+    created: !existingGame,
+    game: toBasicGamePayload(savedGame)
+  };
 }
 
 function extractImageId(value: unknown): string | undefined {
@@ -1199,6 +1400,28 @@ app.whenReady().then(async () => {
     return games.map((game) => toBasicGamePayload(game));
   });
 
+  ipcMain.handle('igdb:search-games', async (_, query: string) => {
+    try {
+      return await searchIgdbGames(query);
+    } catch (error) {
+      console.error('Failed to search IGDB games', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle('igdb:import-game', async (_, userId: number, igdbId: number) => {
+    try {
+      return await importIgdbGameToDatabase(userId, igdbId);
+    } catch (error) {
+      console.error('Failed to import IGDB game', error);
+      return {
+        success: false,
+        created: false,
+        error: error instanceof Error ? error.message : 'Unable to import game'
+      };
+    }
+  });
+
   ipcMain.handle('dev:seed-covers', async () => {
     const covers: Record<string, string> = {
       'Fallout 3': 'https://images.igdb.com/igdb/image/upload/t_cover_big/co2ibb.jpg',
@@ -1327,7 +1550,15 @@ app.whenReady().then(async () => {
     try {
       const user = await prisma.user.findUnique({
         where: { email },
-        include: { role: true }
+        include: {
+          role: {
+            include: {
+              permissions: {
+                select: { action: true }
+              }
+            }
+          }
+        }
       });
 
       if (!user) return { success: false, error: 'User not found' };
@@ -1336,8 +1567,17 @@ app.whenReady().then(async () => {
       if (!isMatch) return { success: false, error: 'Wrong password' };
 
       const { passwordHash, ...safeUser } = user;
+      const normalizedUser = {
+        ...safeUser,
+        role: safeUser.role
+          ? {
+              ...safeUser.role,
+              permissions: safeUser.role.permissions.map((permission) => permission.action)
+            }
+          : undefined
+      };
       activeRemoteUserEmail = user.email;
-      return { success: true, user: safeUser };
+      return { success: true, user: normalizedUser };
     } catch (err) {
       return { success: false, error: 'Database error' };
     }
@@ -1356,7 +1596,15 @@ app.whenReady().then(async () => {
   ipcMain.handle('auth:get-user', async (_, userId: number) => {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      include: { role: true }
+      include: {
+        role: {
+          include: {
+            permissions: {
+              select: { action: true }
+            }
+          }
+        }
+      }
     });
 
     if (!user) {
@@ -1364,7 +1612,15 @@ app.whenReady().then(async () => {
     }
 
     const { passwordHash, ...safeUser } = user;
-    return safeUser;
+    return {
+      ...safeUser,
+      role: safeUser.role
+        ? {
+            ...safeUser.role,
+            permissions: safeUser.role.permissions.map((permission) => permission.action)
+          }
+        : undefined
+    };
   });
 
   ipcMain.handle('auth:clear-active-user', async () => {
@@ -1927,6 +2183,164 @@ app.whenReady().then(async () => {
     };
   });
 
+  type AdminAuditTarget = 'user' | 'role' | 'permission' | 'rbac' | 'game';
+
+  const getAdminAuditLogPath = () => join(app.getPath('userData'), 'admin-audit.log');
+
+  const logAdminAction = async (params: {
+    actorEmail: string;
+    action: string;
+    targetType: AdminAuditTarget;
+    targetId?: string;
+    details?: string;
+  }) => {
+    await appendAuditLogEntry(params);
+  };
+
+  const readAdminAuditLog = async (limit = 80) => {
+    const safeLimit = Math.max(1, Math.min(limit, 300));
+
+    try {
+      const content = await readFile(getAdminAuditLogPath(), 'utf8');
+      const rows = content
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          try {
+            return JSON.parse(line) as {
+              id: string;
+              actorEmail: string;
+              action: string;
+              targetType: AdminAuditTarget;
+              targetId?: string;
+              details?: string;
+              createdAt: string;
+            };
+          } catch {
+            return null;
+          }
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+
+      return rows.slice(-safeLimit).reverse();
+    } catch (error) {
+      const code =
+        typeof error === 'object' && error && 'code' in error
+          ? String((error as { code?: unknown }).code || '')
+          : '';
+
+      if (code === 'ENOENT') {
+        return [];
+      }
+
+      console.warn('Failed to read admin audit log', error);
+      return [];
+    }
+  };
+
+  const requireAdminAccess = async () => {
+    if (!activeRemoteUserEmail) {
+      throw new Error('Not authenticated');
+    }
+
+    const actor = await prisma.user.findUnique({
+      where: { email: activeRemoteUserEmail },
+      include: {
+        role: {
+          include: {
+            permissions: {
+              select: {
+                action: true
+              }
+            }
+          }
+        }
+      }
+    });
+
+    if (!actor || actor.role.name.toLowerCase() !== 'admin') {
+      throw new Error('Admin access required');
+    }
+
+    return actor;
+  };
+
+  const actorHasPermission = (
+    actor: Awaited<ReturnType<typeof requireAdminAccess>>,
+    action: string
+  ) => {
+    return actor.role.permissions.some((permission) => permission.action === action);
+  };
+
+  const buildAdminAccessData = async () => {
+    const [users, roles, permissions] = await Promise.all([
+      prisma.user.findMany({
+        include: {
+          role: {
+            select: {
+              id: true,
+              name: true
+            }
+          }
+        },
+        orderBy: {
+          id: 'asc'
+        }
+      }),
+      prisma.role.findMany({
+        include: {
+          permissions: {
+            select: {
+              id: true,
+              action: true
+            }
+          },
+          users: {
+            select: {
+              id: true
+            }
+          }
+        },
+        orderBy: {
+          id: 'asc'
+        }
+      }),
+      prisma.permission.findMany({
+        select: {
+          id: true,
+          action: true,
+          description: true
+        },
+        orderBy: {
+          id: 'asc'
+        }
+      })
+    ]);
+
+    return {
+      users: users.map((user) => ({
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        roleId: user.roleId,
+        roleName: user.role.name,
+        createdAt: user.createdAt?.toISOString()
+      })),
+      roles: roles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        permissionIds: role.permissions.map((permission) => permission.id),
+        usersCount: role.users.length
+      })),
+      permissions: permissions.map((permission) => ({
+        id: permission.id,
+        action: permission.action,
+        description: permission.description ?? undefined
+      }))
+    };
+  };
+
   ipcMain.handle('admin:get-rbac-summary', async () => {
     const [roles, permissions] = await Promise.all([
       prisma.role.findMany({
@@ -1976,6 +2390,353 @@ app.whenReady().then(async () => {
         usedInRoles: permission.roles.map((role) => role.name)
       }))
     };
+  });
+
+  ipcMain.handle('admin:get-access-data', async () => {
+    await requireAdminAccess();
+    return buildAdminAccessData();
+  });
+
+  ipcMain.handle('admin:get-audit-log', async (_, limit?: number) => {
+    await requireAdminAccess();
+    return readAdminAuditLog(limit ?? 80);
+  });
+
+  ipcMain.handle('admin:update-user-role', async (_, targetUserId: number, roleId: number) => {
+    const actor = await requireAdminAccess();
+
+    const [nextRole, targetUser] = await Promise.all([
+      prisma.role.findUnique({
+        where: { id: roleId },
+        select: {
+          id: true,
+          name: true
+        }
+      }),
+      prisma.user.findUnique({
+        where: { id: targetUserId },
+        include: {
+          role: {
+            select: {
+              id: true,
+              name: true
+            }
+          }
+        }
+      })
+    ]);
+
+    if (!nextRole) {
+      return { success: false, error: 'Role not found' };
+    }
+
+    if (!targetUser) {
+      return { success: false, error: 'Target user not found' };
+    }
+
+    const isTargetCurrentlyAdmin = targetUser.role.name.toLowerCase() === 'admin';
+    const isAssigningAdmin = nextRole.name.toLowerCase() === 'admin';
+    const touchesAdminRole = isTargetCurrentlyAdmin || isAssigningAdmin;
+
+    if (touchesAdminRole && !actorHasPermission(actor, 'admin.modify_admins')) {
+      return {
+        success: false,
+        error: 'Missing permission: admin.modify_admins (required to grant/revoke Admin role)'
+      };
+    }
+
+    if (actor.id === targetUserId && nextRole.name.toLowerCase() !== 'admin') {
+      return { success: false, error: 'You cannot remove your own admin role' };
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: targetUserId },
+      data: {
+        roleId
+      },
+      include: {
+        role: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    });
+
+    await logAdminAction({
+      actorEmail: actor.email,
+      action: 'update-user-role',
+      targetType: 'user',
+      targetId: String(targetUserId),
+      details: `Assigned role ${updated.role.name} (#${roleId})`
+    });
+
+    return {
+      success: true,
+      user: {
+        id: updated.id,
+        username: updated.username,
+        email: updated.email,
+        roleId: updated.roleId,
+        roleName: updated.role.name,
+        createdAt: updated.createdAt?.toISOString()
+      }
+    };
+  });
+
+  ipcMain.handle(
+    'admin:update-role-permissions',
+    async (_, roleId: number, permissionIds: number[]) => {
+      const actor = await requireAdminAccess();
+
+      const role = await prisma.role.findUnique({
+        where: { id: roleId },
+        include: {
+          permissions: {
+            select: {
+              id: true,
+              action: true
+            }
+          }
+        }
+      });
+
+      if (!role) {
+        return { success: false, error: 'Role not found' };
+      }
+
+      const uniquePermissionIds = [
+        ...new Set(permissionIds.filter((value) => Number.isInteger(value)))
+      ];
+      const availablePermissions = await prisma.permission.findMany({
+        where: {
+          id: {
+            in: uniquePermissionIds
+          }
+        },
+        select: {
+          id: true,
+          action: true
+        }
+      });
+
+      if (availablePermissions.length !== uniquePermissionIds.length) {
+        return { success: false, error: 'One or more selected permissions do not exist' };
+      }
+
+      await prisma.role.update({
+        where: { id: roleId },
+        data: {
+          permissions: {
+            set: uniquePermissionIds.map((id) => ({ id }))
+          }
+        }
+      });
+
+      const previousActions = role.permissions
+        .map((permission) => permission.action)
+        .sort()
+        .join(', ');
+      const nextActions = availablePermissions
+        .map((permission) => permission.action)
+        .sort()
+        .join(', ');
+
+      await logAdminAction({
+        actorEmail: actor.email,
+        action: 'update-role-permissions',
+        targetType: 'rbac',
+        targetId: String(roleId),
+        details: `Role ${role.name}: [${previousActions}] -> [${nextActions}]`
+      });
+
+      return { success: true };
+    }
+  );
+
+  ipcMain.handle('admin:create-role', async (_, name: string) => {
+    const actor = await requireAdminAccess();
+    const normalizedName = name.trim();
+
+    if (!normalizedName) {
+      return { success: false, error: 'Role name is required' };
+    }
+
+    const exists = await prisma.role.findFirst({
+      where: {
+        name: {
+          equals: normalizedName,
+          mode: 'insensitive'
+        }
+      },
+      select: {
+        id: true
+      }
+    });
+
+    if (exists) {
+      return { success: false, error: 'Role already exists' };
+    }
+
+    const created = await prisma.role.create({
+      data: {
+        name: normalizedName
+      },
+      select: {
+        id: true,
+        name: true
+      }
+    });
+
+    await logAdminAction({
+      actorEmail: actor.email,
+      action: 'create-role',
+      targetType: 'role',
+      targetId: String(created.id),
+      details: created.name
+    });
+
+    return { success: true };
+  });
+
+  ipcMain.handle('admin:delete-role', async (_, roleId: number) => {
+    const actor = await requireAdminAccess();
+
+    const role = await prisma.role.findUnique({
+      where: { id: roleId },
+      include: {
+        users: {
+          select: {
+            id: true
+          }
+        }
+      }
+    });
+
+    if (!role) {
+      return { success: false, error: 'Role not found' };
+    }
+
+    if (role.name.toLowerCase() === 'admin') {
+      return { success: false, error: 'Admin role cannot be deleted' };
+    }
+
+    if (role.users.length > 0) {
+      return { success: false, error: 'Move users to another role before deleting this role' };
+    }
+
+    await prisma.role.delete({
+      where: {
+        id: roleId
+      }
+    });
+
+    await logAdminAction({
+      actorEmail: actor.email,
+      action: 'delete-role',
+      targetType: 'role',
+      targetId: String(roleId),
+      details: role.name
+    });
+
+    return { success: true };
+  });
+
+  ipcMain.handle('admin:create-permission', async (_, action: string, description?: string) => {
+    const actor = await requireAdminAccess();
+    const normalizedAction = action.trim();
+
+    if (!normalizedAction) {
+      return { success: false, error: 'Permission action is required' };
+    }
+
+    const exists = await prisma.permission.findFirst({
+      where: {
+        action: {
+          equals: normalizedAction,
+          mode: 'insensitive'
+        }
+      },
+      select: {
+        id: true
+      }
+    });
+
+    if (exists) {
+      return { success: false, error: 'Permission action already exists' };
+    }
+
+    const created = await prisma.permission.create({
+      data: {
+        action: normalizedAction,
+        description: description?.trim() || null
+      },
+      select: {
+        id: true,
+        action: true
+      }
+    });
+
+    await logAdminAction({
+      actorEmail: actor.email,
+      action: 'create-permission',
+      targetType: 'permission',
+      targetId: String(created.id),
+      details: created.action
+    });
+
+    return { success: true };
+  });
+
+  ipcMain.handle('admin:delete-permission', async (_, permissionId: number) => {
+    const actor = await requireAdminAccess();
+
+    const permission = await prisma.permission.findUnique({
+      where: { id: permissionId },
+      include: {
+        roles: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    });
+
+    if (!permission) {
+      return { success: false, error: 'Permission not found' };
+    }
+
+    if (permission.action === 'admin.rbac') {
+      return { success: false, error: 'admin.rbac permission cannot be deleted' };
+    }
+
+    await prisma.$transaction([
+      ...permission.roles.map((role) =>
+        prisma.role.update({
+          where: { id: role.id },
+          data: {
+            permissions: {
+              disconnect: { id: permissionId }
+            }
+          }
+        })
+      ),
+      prisma.permission.delete({
+        where: { id: permissionId }
+      })
+    ]);
+
+    await logAdminAction({
+      actorEmail: actor.email,
+      action: 'delete-permission',
+      targetType: 'permission',
+      targetId: String(permissionId),
+      details: `${permission.action} (used in ${permission.roles.length} roles)`
+    });
+
+    return { success: true };
   });
 });
 

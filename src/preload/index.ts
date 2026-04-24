@@ -6,6 +6,9 @@ import { Credentials } from '../shared/types';
 const api = {
   getGames: () => ipcRenderer.invoke('get-games'),
   getGameDetails: (gameId: string) => ipcRenderer.invoke('get-game-details', gameId),
+  searchIgdbGames: (query: string) => ipcRenderer.invoke('igdb:search-games', query),
+  importIgdbGame: (userId: number, igdbId: number) =>
+    ipcRenderer.invoke('igdb:import-game', userId, igdbId),
   login: (credentials: Credentials) => ipcRenderer.invoke('auth:login', credentials),
   getUser: (userId: number) => ipcRenderer.invoke('auth:get-user', userId),
   setActiveRemoteUser: (userId: number) => ipcRenderer.invoke('auth:set-active-user', userId),
@@ -45,7 +48,19 @@ const api = {
   getRecentSessionGames: (userId: number, limit?: number) =>
     ipcRenderer.invoke('sessions:recent-games', userId, limit),
   getProfileDashboard: (userId: number) => ipcRenderer.invoke('profile:get-dashboard', userId),
-  getAdminRbacSummary: () => ipcRenderer.invoke('admin:get-rbac-summary')
+  getAdminRbacSummary: () => ipcRenderer.invoke('admin:get-rbac-summary'),
+  getAdminAccessData: () => ipcRenderer.invoke('admin:get-access-data'),
+  updateAdminUserRole: (targetUserId: number, roleId: number) =>
+    ipcRenderer.invoke('admin:update-user-role', targetUserId, roleId),
+  createAdminRole: (name: string) => ipcRenderer.invoke('admin:create-role', name),
+  deleteAdminRole: (roleId: number) => ipcRenderer.invoke('admin:delete-role', roleId),
+  createAdminPermission: (action: string, description?: string) =>
+    ipcRenderer.invoke('admin:create-permission', action, description),
+  deleteAdminPermission: (permissionId: number) =>
+    ipcRenderer.invoke('admin:delete-permission', permissionId),
+  updateAdminRolePermissions: (roleId: number, permissionIds: number[]) =>
+    ipcRenderer.invoke('admin:update-role-permissions', roleId, permissionIds),
+  getAdminAuditLog: (limit?: number) => ipcRenderer.invoke('admin:get-audit-log', limit)
 };
 
 // Use `contextBridge` APIs to expose Electron APIs to

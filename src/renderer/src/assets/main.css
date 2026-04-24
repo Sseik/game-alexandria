@@ -1099,6 +1099,10 @@ a {
   gap: 4px;
 }
 
+.profile-tabs.admin-tabs {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .profile-tabs button {
   border: none;
   border-radius: 8px;
@@ -1273,6 +1277,55 @@ a {
   gap: 12px;
 }
 
+.admin-section-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.admin-form-inline {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.admin-form-inline input {
+  height: 36px;
+  border: 1px solid #2f3543;
+  border-radius: 8px;
+  background: #12151d;
+  color: #f1f3fa;
+  padding: 0 10px;
+}
+
+.admin-form-stack {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.admin-role-permission-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.admin-role-permission-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+
+.admin-role-actions {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quick-launch-button.admin-danger {
+  background: #712434;
+}
+
 .permission-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1377,6 +1430,99 @@ a {
   background: #7f2232;
 }
 
+.igdb-import-panel {
+  margin-top: 20px;
+  border: 1px solid #2a3040;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(24, 28, 40, 0.9), rgba(13, 15, 20, 0.98));
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.igdb-import-head {
+  display: grid;
+  gap: 4px;
+}
+
+.igdb-import-head h3 {
+  margin: 0;
+}
+
+.igdb-import-head p {
+  margin: 0;
+  color: #aeb3c6;
+}
+
+.igdb-import-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.igdb-import-card {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+  border: 1px solid #2b2f3b;
+  border-radius: 12px;
+  background: #10131a;
+  padding: 12px;
+}
+
+.igdb-import-cover {
+  height: 170px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #1a1d27;
+}
+
+.igdb-import-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.igdb-import-content {
+  display: grid;
+  align-content: space-between;
+  gap: 12px;
+}
+
+.igdb-import-content h4 {
+  margin: 0 0 6px;
+}
+
+.igdb-import-content p {
+  margin: 0;
+  color: #b9bbc7;
+}
+
+.igdb-import-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.igdb-import-actions button {
+  border: none;
+  border-radius: 8px;
+  background: var(--ev-accent-color, #2147a2);
+  color: #fff;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.igdb-import-actions button:disabled {
+  opacity: 0.65;
+  cursor: progress;
+}
+
+.igdb-import-actions span {
+  color: #9ea0ad;
+}
+
 @media (max-width: 1380px) {
   .catalog-layout {
     grid-template-columns: 1fr;
@@ -1398,6 +1544,7 @@ a {
 
   .profile-grid.two-columns,
   .admin-roles-grid,
+  .igdb-import-grid,
   .wishlist-toolbar,
   .wishlist-item,
   .pie-wrap {

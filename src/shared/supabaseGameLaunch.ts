@@ -36,7 +36,12 @@ export function subscribeToGameLaunchCommands(
         onCommand(payload.payload);
       }
     })
-    .subscribe((status: string) => {
+    .subscribe((status: string, err?: { message?: string }) => {
+      if (err?.message) {
+        console.log(`[Supabase] Game launch channel subscription: ${status} (${err.message})`);
+        return;
+      }
+
       console.log(`[Supabase] Game launch channel subscription: ${status}`);
     });
 }

@@ -60,10 +60,6 @@ export function startSupabaseLaunchListener(options: RemoteLaunchInitOptions): (
     }
   );
 
-  channel.subscribe((status: string) => {
-    console.log(`[Supabase] Shared launch channel status: ${status}`);
-  });
-
   return () => {
     void adminClient.removeChannel(channel);
   };

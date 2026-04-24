@@ -95,6 +95,64 @@ export interface AdminRbacSummary {
   permissions: AdminPermissionSummary[];
 }
 
+export interface AdminUserSummary {
+  id: number;
+  username: string;
+  email: string;
+  roleId: number;
+  roleName: string;
+  createdAt?: string;
+}
+
+export interface AdminRoleOption {
+  id: number;
+  name: string;
+}
+
+export interface AdminEditableRole extends AdminRoleOption {
+  permissionIds: number[];
+  usersCount: number;
+}
+
+export interface AdminEditablePermission {
+  id: number;
+  action: string;
+  description?: string;
+}
+
+export interface AdminAuditEntry {
+  id: string;
+  actorEmail: string;
+  action: string;
+  targetType: 'user' | 'role' | 'permission' | 'rbac' | 'game';
+  targetId?: string;
+  details?: string;
+  createdAt: string;
+}
+
+export interface IgdbImportCandidate {
+  igdbId: number;
+  title: string;
+  description?: string;
+  coverUrl?: string;
+  score?: number | null;
+  inDatabase: boolean;
+  gameId?: string;
+}
+
+export interface ImportedGameResult {
+  success: boolean;
+  created: boolean;
+  game?: Game;
+  error?: string;
+}
+
+export interface AdminAccessData {
+  users: AdminUserSummary[];
+  roles: AdminEditableRole[];
+  permissions: AdminEditablePermission[];
+}
+
 export interface Credentials {
   success: boolean;
   user?: User;
@@ -105,6 +163,7 @@ export interface Role {
   id: number;
   name: string;
   canRemoteLaunch?: boolean;
+  permissions?: string[];
 }
 
 export interface User {
