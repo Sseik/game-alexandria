@@ -60,7 +60,12 @@ const api = {
     ipcRenderer.invoke('admin:delete-permission', permissionId),
   updateAdminRolePermissions: (roleId: number, permissionIds: number[]) =>
     ipcRenderer.invoke('admin:update-role-permissions', roleId, permissionIds),
-  getAdminAuditLog: (limit?: number) => ipcRenderer.invoke('admin:get-audit-log', limit)
+  getAdminAuditLog: (limit?: number) => ipcRenderer.invoke('admin:get-audit-log', limit),
+  dialogOpenFile: () => ipcRenderer.invoke('dialog:open-file'),
+  removeLibraryGameEntry: (userId: number, gameId: string, platformId: string) =>
+    ipcRenderer.invoke('library:remove-entry', userId, gameId, platformId),
+  showConfirmDialog: (message: string) => ipcRenderer.invoke('dialog:confirm', message),
+  deleteGame: (gameId: string) => ipcRenderer.invoke('admin:delete-game', gameId)
 };
 
 // Use `contextBridge` APIs to expose Electron APIs to

@@ -1,9 +1,9 @@
 import 'dotenv/config';
-import { app, shell, BrowserWindow, ipcMain } from 'electron';
+import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron';
 import { join, dirname } from 'path';
 import { spawn } from 'child_process';
 import { promisify } from 'util';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
 import icon from '../../resources/icon.png?asset';
 import { PrismaClient } from '../generated/prisma/client';
@@ -80,8 +80,8 @@ type AuditLogEntry = {
 };
 
 const IGDB_TITLE_ID_FALLBACKS: Record<string, number> = {
-  'fallout 1': 115,
-  undertale: 16662,
+  'fallout 1': 13,
+  undertale: 12517,
   'risk of rain 1': 3173
 };
 
@@ -190,13 +190,6 @@ function inferLaunchUrl(platformName: string, websiteUrl: string): string | unde
     }
   }
 
-  if (normalizedPlatform === 'epic games') {
-    const epicMatch = websiteUrl.match(/\/(?:p|product)\/([^/?#]+)/i);
-    if (epicMatch?.[1]) {
-      return `com.epicgames.launcher://store/product/${epicMatch[1]}`;
-    }
-  }
-
   return undefined;
 }
 
@@ -216,27 +209,46 @@ function scoreTitleMatch(source: string, candidate: string): number {
   const normalizedSource = normalizeTitle(source);
   const normalizedCandidate = normalizeTitle(candidate);
 
-  if (!normalizedSource || !normalizedCandidate) {
-    return 0;
-  }
+  if (!normalizedSource || !normalizedCandidate) return 0;
+  if (normalizedSource === normalizedCandidate) return 1;
 
-  if (normalizedSource === normalizedCandidate) {
-    return 1;
+  const sourceTokens = normalizedSource.split(' ');
+  const candidateTokens = normalizedCandidate.split(' ');
+
+  const sSet = new Set(sourceTokens);
+  const cSet = new Set(candidateTokens);
+  const overlap = [...sSet].filter((token) => cSet.has(token)).length;
+  const union = new Set([...sSet, ...cSet]).size;
+  const baseScore = union === 0 ? 0 : overlap / union;
+
+  const isPrefix =
+    normalizedCandidate.startsWith(normalizedSource + ' ') ||
+    normalizedSource.startsWith(normalizedCandidate + ' ');
+
+  if (isPrefix) {
+    const longerTokens =
+      sourceTokens.length > candidateTokens.length ? sourceTokens : candidateTokens;
+    const shorterTokens =
+      sourceTokens.length > candidateTokens.length ? candidateTokens : sourceTokens;
+
+    const firstExtraWord = longerTokens[shorterTokens.length];
+    const isSequel = /^(\d+|i{1,3}|iv|v|vi{0,3}|ix|x)$/.test(firstExtraWord);
+
+    if (isSequel) {
+      return Math.max(baseScore, 0.4); 
+    } else {
+      return 0.9; 
+    }
   }
 
   if (
     normalizedSource.includes(normalizedCandidate) ||
     normalizedCandidate.includes(normalizedSource)
   ) {
-    return 0.85;
+    return 0.85 - Math.abs(normalizedSource.length - normalizedCandidate.length) * 0.005;
   }
 
-  const sourceTokens = new Set(normalizedSource.split(' '));
-  const candidateTokens = new Set(normalizedCandidate.split(' '));
-  const overlap = [...sourceTokens].filter((token) => candidateTokens.has(token)).length;
-  const union = new Set([...sourceTokens, ...candidateTokens]).size;
-
-  return union === 0 ? 0 : overlap / union;
+  return baseScore;
 }
 
 function isLikelyPackageTitle(value: string): boolean {
@@ -745,31 +757,82 @@ function getDefaultLaunchPrefix(platformName: string): string | null {
   return null;
 }
 
-function slugifyTitle(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+async function getEpicLocalDeeplink(gameTitles: string[]): Promise<string | null> {
+  if (process.platform !== 'win32') return null;
+
+  const manifestsDir = 'C:\\ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests';
+  let bestMatch: { score: number; link: string; name: string } | null = null;
+
+  try {
+    const files = await readdir(manifestsDir);
+
+    for (const file of files) {
+      if (!file.endsWith('.item')) continue;
+
+      const content = await readFile(join(manifestsDir, file), 'utf8');
+      const manifest = JSON.parse(content);
+      if (!manifest.DisplayName) continue;
+
+      // Шукаємо найвищий бал серед усіх варіантів назви для поточного маніфесту
+      let highestScore = 0;
+      for (const title of gameTitles) {
+        if (!title) continue;
+        const score = scoreTitleMatch(title, manifest.DisplayName);
+        if (score > highestScore) highestScore = score;
+      }
+
+      if (highestScore >= 0.8) {
+        const namespace = manifest.CatalogNamespace || manifest.Namespace;
+        const catalogId = manifest.CatalogItemId || manifest.ItemId;
+        const appName = manifest.AppName;
+
+        if (namespace && catalogId && appName) {
+          const link = `com.epicgames.launcher://apps/${namespace}%3A${catalogId}%3A${appName}?action=launch&silent=true`;
+
+          // Зберігаємо тільки якщо це найкращий збіг з усіх файлів!
+          if (!bestMatch || highestScore > bestMatch.score) {
+            bestMatch = { score: highestScore, link, name: manifest.DisplayName };
+          }
+        }
+      }
+    }
+
+    if (bestMatch) {
+      console.log(`[Epic Magic] BEST MATCH: "${bestMatch.name}" with score ${bestMatch.score}`);
+    } else {
+      console.log(`[Epic Magic] No matches found for: ${gameTitles.join(', ')}`);
+    }
+  } catch (e) {
+    console.error('Epic Games manifests not found or unreadable.');
+  }
+
+  return bestMatch ? bestMatch.link : null;
 }
 
-function buildAutoLaunchTarget(
+async function buildAutoLaunchTarget(
   platformName: string,
   launchPrefix: string | null | undefined,
   game: Pick<GameRecord, 'title' | 'igdbId'>
-): string | null {
+): Promise<string | null> {
+  const normalizedPlatform = normalizePlatformName(platformName).toLowerCase();
+
+  if (normalizedPlatform === 'epic games') {
+    const titlesToTry = [
+      game.title,
+      game.title.split(':')[0].trim(),
+      game.title.split('-')[0].trim(),
+      game.title.replace(/\s+1$/i, '').trim() // Для "Fallout 1" -> "Fallout"
+    ];
+    // Передаємо масив усіх можливих назв
+    return await getEpicLocalDeeplink(titlesToTry);
+  }
+
   if (!launchPrefix) {
     return null;
   }
 
-  const normalizedPlatform = normalizePlatformName(platformName).toLowerCase();
-
-  if (game.igdbId) {
+  if (game.igdbId && normalizedPlatform === 'steam') {
     return `${launchPrefix}${game.igdbId}`;
-  }
-
-  if (normalizedPlatform === 'epic games') {
-    const slug = slugifyTitle(game.title);
-    return slug ? `${launchPrefix}${slug}` : null;
   }
 
   return null;
@@ -1530,12 +1593,29 @@ app.whenReady().then(async () => {
         }
       : undefined;
 
+    const cleanTitle = game.title.split(':')[0].trim();
+    let cheapsharkUrl: string | undefined =
+      `https://gg.deals/games/?title=${encodeURIComponent(cleanTitle)}`;
+    try {
+      const csRes = await fetch(
+        `https://www.cheapshark.com/api/1.0/games?title=${encodeURIComponent(cleanTitle)}&limit=1`
+      );
+      const csData = await csRes.json();
+      if (csData && csData.length > 0) {
+        // Отримуємо посилання на гру (CheapShark вимагає вказувати їх як джерело)
+        cheapsharkUrl = `https://www.cheapshark.com/redirect?dealID=${csData[0].cheapestDealID}`;
+      }
+    } catch (e) {
+      console.error('CheapShark error', e);
+    }
+
     const detailedPayload = {
       ...enrichedGame,
       platformId: '',
       platforms: platformNames,
       priceHistory,
-      priceStats
+      priceStats,
+      cheapsharkUrl
     };
 
     gameDetailsCache.set(gameId, {
@@ -1544,6 +1624,30 @@ app.whenReady().then(async () => {
     });
 
     return detailedPayload;
+  });
+
+  ipcMain.handle('dialog:open-file', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [
+        { name: 'Executables', extensions: ['exe', 'bat', 'cmd', 'com', 'lnk'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+
+    if (canceled || filePaths.length === 0) return null;
+    return filePaths[0]; 
+  });
+
+  ipcMain.handle('dialog:confirm', async (_, message: string) => {
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Remove', 'Cancel'],
+      defaultId: 1, 
+      title: 'Confirm Action',
+      message: message
+    });
+    return response === 0; 
   });
 
   ipcMain.handle('auth:login', async (_, { email, password }) => {
@@ -1826,8 +1930,8 @@ app.whenReady().then(async () => {
         );
 
         resolvedLaunchTarget =
+          (await buildAutoLaunchTarget(normalizedName, platform.launchPrefix, game)) ||
           matchedLink?.launchUrl?.trim() ||
-          buildAutoLaunchTarget(normalizedName, platform.launchPrefix, game) ||
           null;
       }
 
@@ -1972,8 +2076,8 @@ app.whenReady().then(async () => {
         );
 
         resolvedLaunchTarget =
+          (await buildAutoLaunchTarget(normalizedName, platform.launchPrefix, game)) ||
           matchedLink?.launchUrl?.trim() ||
-          buildAutoLaunchTarget(normalizedName, platform.launchPrefix, game) ||
           null;
       }
 
@@ -1997,6 +2101,25 @@ app.whenReady().then(async () => {
       });
 
       return { success: true };
+    }
+  );
+
+  ipcMain.handle(
+    'library:remove-entry',
+    async (_, userId: number, gameId: string, platformId: string) => {
+      try {
+        await prisma.userLibrary.deleteMany({
+          where: {
+            appUserId: userId,
+            gameId: Number(gameId),
+            platformId: Number(platformId)
+          }
+        });
+        return { success: true };
+      } catch (error) {
+        console.error('Failed to remove game', error);
+        return { success: false, error: 'Failed to remove game from library' };
+      }
     }
   );
 
@@ -2390,6 +2513,47 @@ app.whenReady().then(async () => {
         usedInRoles: permission.roles.map((role) => role.name)
       }))
     };
+  });
+
+  ipcMain.handle('admin:delete-game', async (_, gameId: string) => {
+    // 1. Перевіряємо, чи це робить адмін
+    const actor = await requireAdminAccess();
+    const numericGameId = Number(gameId);
+
+    // 2. Знаходимо гру, щоб зберегти її назву для логів
+    const game = await prisma.game.findUnique({
+      where: { id: numericGameId },
+      select: { title: true }
+    });
+
+    if (!game) {
+      return { success: false, error: 'Game not found' };
+    }
+
+    try {
+      // 3. Видаляємо гру та ВСІ пов'язані з нею дані через транзакцію (каскадне видалення)
+      await prisma.$transaction([
+        prisma.priceHistory.deleteMany({ where: { gameId: numericGameId } }),
+        prisma.userLibrary.deleteMany({ where: { gameId: numericGameId } }),
+        prisma.wishlist.deleteMany({ where: { gameId: numericGameId } }),
+        prisma.gameSession.deleteMany({ where: { gameId: numericGameId } }),
+        prisma.game.delete({ where: { id: numericGameId } })
+      ]);
+
+      // 4. Записуємо дію в аудит-лог
+      await logAdminAction({
+        actorEmail: actor.email,
+        action: 'delete-game',
+        targetType: 'game',
+        targetId: gameId,
+        details: `Deleted game: ${game.title}`
+      });
+
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to delete game:', error);
+      return { success: false, error: 'Failed to delete game and its relations' };
+    }
   });
 
   ipcMain.handle('admin:get-access-data', async () => {

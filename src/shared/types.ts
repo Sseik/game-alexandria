@@ -26,6 +26,7 @@ export interface Game {
   };
   targetPrice?: number | null;
   addedAt?: string;
+  cheapsharkUrl?: string; // <--- ДОДАТИ ЦЕЙ РЯДОК
 }
 
 export interface PlatformLink {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Game, IgdbImportCandidate } from '../../../shared/types';
+import { Game, IgdbImportCandidate, LibraryPlatform } from '../../../shared/types';
 import { useAuth } from '@renderer/context/AuthContext';
 import GamesGrid from './GamesGrid';
 import { shouldRetryVisibleIgdbMetadata } from '../shared/igdbRefresh';
@@ -11,11 +11,25 @@ const PAGE_SIZE = 8;
 function SearchedGames() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [games, setGames] = useState<Game[]>([]);
+  const [libraryPlatforms, setLibraryPlatforms] = useState<LibraryPlatform[]>([]); // ДОДАНО: Стан для платформ
   const [sortBy, setSortBy] = useState<SortOption>('relevance');
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
-  const [currentPage, setCurrentPage] = useState(1);
+
+  const currentPage = parseInt(searchParams.get('page') || '1', 10);
+  const setCurrentPage = (page: number) => {
+    setSearchParams((prev) => {
+      const nextParams = new URLSearchParams(prev);
+      if (page <= 1) {
+        nextParams.delete('page');
+      } else {
+        nextParams.set('page', page.toString());
+      }
+      return nextParams;
+    });
+  };
+
   const [igdbGames, setIgdbGames] = useState<IgdbImportCandidate[]>([]);
   const [igdbLoading, setIgdbLoading] = useState(false);
   const [igdbError, setIgdbError] = useState<string | null>(null);
@@ -25,9 +39,14 @@ function SearchedGames() {
   const query = (searchParams.get('q') || '').trim();
   const canImportGames = Boolean(user?.role?.permissions?.includes('games.write'));
 
+  // ДОДАНО: Одночасне завантаження ігор та списку платформ з БД
   const loadGames = async () => {
-    const fetchedGames = await window.api.getGames();
+    const [fetchedGames, fetchedPlatforms] = await Promise.all([
+      window.api.getGames(),
+      window.api.getLibraryPlatforms()
+    ]);
     setGames(fetchedGames);
+    setLibraryPlatforms(fetchedPlatforms || []);
   };
 
   useEffect(() => {
@@ -72,19 +91,10 @@ function SearchedGames() {
     };
   }, [canImportGames, query]);
 
+  // ВИПРАВЛЕНО: Тепер беремо платформи не з ігор, а з завантаженого списку БД
   const availablePlatforms = useMemo(() => {
-    const byId = new Map<string, string>();
-
-    for (const game of games) {
-      if (!game.platformId) {
-        continue;
-      }
-
-      byId.set(game.platformId, game.platformName || game.platformId);
-    }
-
-    return [...byId.entries()].map(([id, name]) => ({ id, name }));
-  }, [games]);
+    return libraryPlatforms.map((p) => ({ id: p.id, name: p.name }));
+  }, [libraryPlatforms]);
 
   const filteredGames = useMemo(() => {
     const normalizedQuery = query.toLowerCase();
@@ -93,7 +103,20 @@ function SearchedGames() {
       : games;
 
     const platformFiltered = selectedPlatforms.length
-      ? baseGames.filter((game) => selectedPlatforms.includes(game.platformId))
+      ? baseGames.filter((game) => {
+          // Якщо у гри є ID платформи (вона вже в бібліотеці)
+          if (game.platformId && selectedPlatforms.includes(game.platformId)) return true;
+
+          // Якщо у гри є масив назв платформ (наприклад, з IGDB)
+          if (Array.isArray(game.platforms)) {
+            const selectedNames = libraryPlatforms
+              .filter((p) => selectedPlatforms.includes(String(p.id)))
+              .map((p) => p.name.toLowerCase());
+            if (game.platforms.some((p) => selectedNames.includes(p.toLowerCase()))) return true;
+          }
+
+          return false;
+        })
       : baseGames;
 
     if (sortBy === 'az') {
@@ -105,11 +128,25 @@ function SearchedGames() {
     }
 
     return platformFiltered;
-  }, [games, query, selectedPlatforms, sortBy]);
+  }, [games, query, selectedPlatforms, sortBy, libraryPlatforms]);
+
+  const prevQuery = useRef(query);
+  const prevSortBy = useRef(sortBy);
+  const prevPlatforms = useRef(selectedPlatforms);
 
   useEffect(() => {
-    setCurrentPage(1);
-  }, [query, selectedPlatforms, sortBy]);
+    if (
+      prevQuery.current !== query ||
+      prevSortBy.current !== sortBy ||
+      prevPlatforms.current !== selectedPlatforms
+    ) {
+      setCurrentPage(1);
+
+      prevQuery.current = query;
+      prevSortBy.current = sortBy;
+      prevPlatforms.current = selectedPlatforms;
+    }
+  }, [query, sortBy, selectedPlatforms]);
 
   const totalPages = Math.max(1, Math.ceil(filteredGames.length / PAGE_SIZE));
 
@@ -120,10 +157,17 @@ function SearchedGames() {
   }, [currentPage, filteredGames, totalPages]);
 
   const pageNumbers = useMemo(() => {
-    const pages = [1, currentPage, totalPages].filter(
-      (value, index, arr) => arr.indexOf(value) === index
-    );
-    return pages.sort((a, b) => a - b);
+    const maxPagesToShow = 5;
+
+    let start = Math.max(1, currentPage - Math.floor(maxPagesToShow / 2));
+    let end = start + maxPagesToShow - 1;
+
+    if (end > totalPages) {
+      end = totalPages;
+      start = Math.max(1, end - maxPagesToShow + 1);
+    }
+
+    return Array.from({ length: Math.max(0, end - start + 1) }, (_, i) => start + i);
   }, [currentPage, totalPages]);
 
   const togglePlatformFilter = (platformId: string) => {
@@ -196,7 +240,7 @@ function SearchedGames() {
               <div className="catalog-pagination" aria-label="Search pages">
                 <button
                   className="catalog-page-button"
-                  onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                  onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
                   disabled={currentPage === 1}
                 >
                   {'<'}
@@ -212,7 +256,7 @@ function SearchedGames() {
                 ))}
                 <button
                   className="catalog-page-button"
-                  onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                  onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
                   disabled={currentPage === totalPages}
                 >
                   {'>'}
@@ -302,8 +346,8 @@ function SearchedGames() {
                   <label key={platform.id}>
                     <input
                       type="checkbox"
-                      checked={selectedPlatforms.includes(platform.id)}
-                      onChange={() => togglePlatformFilter(platform.id)}
+                      checked={selectedPlatforms.includes(String(platform.id))}
+                      onChange={() => togglePlatformFilter(String(platform.id))}
                     />
                     <span>{platform.name}</span>
                   </label>

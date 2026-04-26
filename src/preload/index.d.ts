@@ -75,6 +75,14 @@ declare global {
         permissionIds: number[]
       ) => Promise<{ success: boolean; error?: string }>;
       getAdminAuditLog: (limit?: number) => Promise<AdminAuditEntry[]>;
+      dialogOpenFile: () => Promise<string | null>;
+      removeLibraryGameEntry: (
+        userId: number,
+        gameId: string,
+        platformId: string
+      ) => Promise<{ success: boolean; error?: string }>;
+      showConfirmDialog: (message: string) => Promise<boolean>;
+      deleteGame(gameId: string): Promise<{ success: boolean; error?: string }>;
     };
   }
 }

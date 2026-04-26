@@ -233,10 +233,15 @@ header {
 .quick-launch-button {
   border: none;
   border-radius: 8px;
-  background: #1f4fb8;
+  background-color: var(--ev-accent-color);
   color: #fff;
   padding: 6px 10px;
   cursor: pointer;
+  transition: filter 0.2s;
+}
+
+button.quick-launch-button:hover {
+  filter: brightness(1.2);
 }
 
 .quick-launch-button:disabled {
