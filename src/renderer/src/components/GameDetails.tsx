@@ -22,21 +22,31 @@ function readLocalSettings(): LocalSettings | null {
   }
 }
 
-function buildPolyline(points: Array<{ label: string; price: number }>): string {
-  if (points.length < 2) return '';
+function calculateChartPoints(
+  points: Array<{ label: string; price: number }>,
+  globalMin: number,
+  globalMax: number
+) {
+  if (!points || points.length === 0) return [];
+
   const width = 420;
   const height = 210;
-  const minPrice = Math.min(...points.map((point) => point.price));
-  const maxPrice = Math.max(...points.map((point) => point.price));
-  const valueRange = Math.max(1, maxPrice - minPrice);
-  return points
-    .map((point, index) => {
-      const x = (index / (points.length - 1)) * width;
-      const normalized = (point.price - minPrice) / valueRange;
-      const y = height - normalized * height;
-      return `${x},${y}`;
-    })
-    .join(' ');
+  const valueRange = globalMax - globalMin;
+
+  return points.map((point, index) => {
+    // Якщо точка лише одна, ставимо її по центру
+    const x = points.length === 1 ? width / 2 : (index / (points.length - 1)) * width;
+    let y: number;
+
+    if (valueRange === 0) {
+      y = height / 2; // Ціна стабільна
+    } else {
+      const normalized = (point.price - globalMin) / valueRange;
+      y = height - normalized * height;
+    }
+
+    return { x, y, price: point.price, label: point.label };
+  });
 }
 
 function getYouTubeThumbnailFromEmbedUrl(url: string): string | null {
@@ -119,8 +129,13 @@ function GameDetails(): React.JSX.Element {
   }, [user, game?.id]);
 
   const priceHistory = game?.priceHistory ?? [];
-  const chartPolyline = buildPolyline(priceHistory);
   const priceStats = game?.priceStats;
+  const chartData = calculateChartPoints(
+    priceHistory,
+    priceStats?.lowest ?? 0,
+    priceStats?.highest ?? 0
+  );
+  const chartPolyline = chartData.map((p) => `${p.x},${p.y}`).join(' ');
   const platformLinks = game?.platformLinks ?? [];
   const logoUrl = game?.logoUrl || game?.coverUrl;
 
@@ -238,7 +253,7 @@ function GameDetails(): React.JSX.Element {
     if (!confirmed) return;
 
     try {
-      // Викликаємо метод з preload 
+      // Викликаємо метод з preload
       const result = await window.api.deleteGame(game.id);
 
       if (result.success) {
@@ -601,7 +616,8 @@ function GameDetails(): React.JSX.Element {
                 className="price-chart-wrap"
                 style={{ position: 'relative', marginLeft: '30px' }}
               >
-                <svg viewBox="0 -10 420 230" style={{ overflow: 'visible' }}>
+                <svg viewBox="0 -10 420 260" style={{ overflow: 'visible' }}>
+                  {/* Горизонтальні лінії сітки */}
                   {[0, 0.5, 1].map((v) => (
                     <line
                       key={v}
@@ -613,16 +629,34 @@ function GameDetails(): React.JSX.Element {
                       strokeDasharray="4"
                     />
                   ))}
-                  <polyline
-                    points={chartPolyline}
-                    fill="none"
-                    stroke="var(--ev-accent-color)"
-                    strokeWidth="3"
-                  />
-                  {chartPolyline.split(' ').map((p, i) => {
-                    const [x, y] = p.split(',');
-                    return <circle key={i} cx={x} cy={y} r="4" fill="var(--ev-accent-color)" />;
-                  })}
+
+                  {/* Лінія графіка */}
+                  {chartPolyline && (
+                    <polyline
+                      points={chartPolyline}
+                      fill="none"
+                      stroke="var(--ev-accent-color)"
+                      strokeWidth="3"
+                    />
+                  )}
+
+                  {/* Точки та дати знизу */}
+                  {chartData.map((p, i) => (
+                    <g key={i}>
+                      <circle cx={p.x} cy={p.y} r="4" fill="var(--ev-accent-color)" />
+                      {/* Дата під кутом, щоб не налізали одна на одну */}
+                      <text
+                        x={p.x}
+                        y="235"
+                        fill="var(--ev-text-muted)"
+                        fontSize="10"
+                        textAnchor="end"
+                        transform={`rotate(-35 ${p.x} 235)`}
+                      >
+                        {p.label}
+                      </text>
+                    </g>
+                  ))}
                 </svg>
                 {priceStats && (
                   <div

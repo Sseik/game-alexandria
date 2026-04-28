@@ -65,7 +65,10 @@ const api = {
   removeLibraryGameEntry: (userId: number, gameId: string, platformId: string) =>
     ipcRenderer.invoke('library:remove-entry', userId, gameId, platformId),
   showConfirmDialog: (message: string) => ipcRenderer.invoke('dialog:confirm', message),
-  deleteGame: (gameId: string) => ipcRenderer.invoke('admin:delete-game', gameId)
+  deleteGame: (gameId: string) => ipcRenderer.invoke('admin:delete-game', gameId),
+  register: (data: { email: string; username: string }) =>
+    ipcRenderer.invoke('auth:register', data),
+  resetPassword: (email) => ipcRenderer.invoke('auth:reset-password', email)
 };
 
 // Use `contextBridge` APIs to expose Electron APIs to

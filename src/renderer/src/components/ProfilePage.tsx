@@ -20,6 +20,10 @@ function ProfilePage(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<ProfileTab>('overview');
   const [dashboard, setDashboard] = useState<ProfileDashboard | null>(null);
 
+  // Стан для фільтрів дати
+  const [startDate, setStartDate] = useState<string>('');
+  const [endDate, setEndDate] = useState<string>('');
+
   const loadDashboard = async (userId: number) => {
     const nextDashboard = await window.api.getProfileDashboard(userId);
     setDashboard(nextDashboard);
@@ -110,6 +114,36 @@ function ProfilePage(): React.JSX.Element {
 
     return `conic-gradient(${slices.join(', ')})`;
   }, [topGames]);
+
+  // Логіка фільтрації сесій
+  const filteredSessions = useMemo(() => {
+    if (!dashboard?.sessionHistory) return [];
+
+    return dashboard.sessionHistory.filter((session) => {
+      const sessionDate = new Date(session.startedAt);
+      const sessionTime = new Date(
+        sessionDate.getFullYear(),
+        sessionDate.getMonth(),
+        sessionDate.getDate()
+      ).getTime();
+
+      let isValid = true;
+
+      if (startDate) {
+        const start = new Date(startDate);
+        const startMs = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
+        if (sessionTime < startMs) isValid = false;
+      }
+
+      if (endDate) {
+        const end = new Date(endDate);
+        const endMs = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+        if (sessionTime > endMs) isValid = false;
+      }
+
+      return isValid;
+    });
+  }, [dashboard?.sessionHistory, startDate, endDate]);
 
   if (!user) {
     return <section className="profile-page" />;
@@ -265,8 +299,69 @@ function ProfilePage(): React.JSX.Element {
 
       {activeTab === 'sessions' ? (
         <article className="profile-card">
-          <h3>Session History</h3>
-          {dashboard?.sessionHistory?.length ? (
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '16px'
+            }}
+          >
+            <h3 style={{ margin: 0 }}>Session History</h3>
+
+            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+              <label
+                style={{ display: 'flex', gap: '6px', fontSize: '13px', alignItems: 'center' }}
+              >
+                Since:
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  style={{
+                    background: '#262b39',
+                    border: '1px solid #30384a',
+                    color: '#fff',
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    fontSize: '13px'
+                  }}
+                />
+              </label>
+              <label
+                style={{ display: 'flex', gap: '6px', fontSize: '13px', alignItems: 'center' }}
+              >
+                Till:
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  style={{
+                    background: '#262b39',
+                    border: '1px solid #30384a',
+                    color: '#fff',
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    fontSize: '13px'
+                  }}
+                />
+              </label>
+              {(startDate || endDate) && (
+                <button
+                  className="secondary"
+                  onClick={() => {
+                    setStartDate('');
+                    setEndDate('');
+                  }}
+                  style={{ padding: '4px 10px', height: 'auto', fontSize: '12px' }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+
+          {filteredSessions.length ? (
             <div className="sessions-table-wrap">
               <table className="sessions-table">
                 <thead>
@@ -279,7 +374,7 @@ function ProfilePage(): React.JSX.Element {
                   </tr>
                 </thead>
                 <tbody>
-                  {dashboard.sessionHistory.map((session) => (
+                  {filteredSessions.map((session) => (
                     <tr key={session.id}>
                       <td>#{session.id}</td>
                       <td>{session.gameTitle}</td>
@@ -294,7 +389,7 @@ function ProfilePage(): React.JSX.Element {
               </table>
             </div>
           ) : (
-            <p className="empty-state">No session history yet.</p>
+            <p className="empty-state">No sessions match the selected dates.</p>
           )}
         </article>
       ) : null}

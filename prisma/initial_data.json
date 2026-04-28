@@ -1,0 +1,62 @@
+{
+  "platforms": [
+    { "name": "Steam", "launchPrefix": "steam://run/" },
+    { "name": "Epic Games", "launchPrefix": null },
+    { "name": "GOG", "launchPrefix": null }
+  ],
+  "permissions": [
+    "games.read",
+    "games.write",
+    "library.manage",
+    "wishlist.manage",
+    "sessions.read",
+    "admin.rbac",
+    "admin.modify_admins"
+  ],
+  "roles": [
+    {
+      "name": "Super Admin",
+      "allowed_actions": [
+        "games.read",
+        "games.write",
+        "library.manage",
+        "wishlist.manage",
+        "sessions.read",
+        "admin.rbac",
+        "admin.modify_admins"
+      ]
+    },
+    {
+      "name": "Admin",
+      "allowed_actions": [
+        "games.read",
+        "games.write",
+        "library.manage",
+        "wishlist.manage",
+        "sessions.read",
+        "admin.rbac"
+      ]
+    },
+    {
+      "name": "Contributor",
+      "allowed_actions": [
+        "games.read",
+        "games.write",
+        "library.manage",
+        "wishlist.manage",
+        "sessions.read"
+      ]
+    },
+    {
+      "name": "User",
+      "allowed_actions": ["games.read", "library.manage", "wishlist.manage", "sessions.read"]
+    }
+  ],
+  "games": [
+    "Stardew Valley",
+    "Terraria",
+    "Factorio",
+    "Disco Elysium",
+    "Fallout: A Post Nuclear Role Playing Game"
+  ]
+}

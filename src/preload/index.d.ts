@@ -83,6 +83,11 @@ declare global {
       ) => Promise<{ success: boolean; error?: string }>;
       showConfirmDialog: (message: string) => Promise<boolean>;
       deleteGame(gameId: string): Promise<{ success: boolean; error?: string }>;
+      register: (data: {
+        email: string;
+        username: string;
+      }) => Promise<{ success: boolean; user?: any; error?: string }>;
+      resetPassword(email: string): Promise<{ success: boolean; error?: string }>;
     };
   }
 }

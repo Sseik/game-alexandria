@@ -15,7 +15,7 @@ function SearchedGames() {
   const [games, setGames] = useState<Game[]>([]);
   const [libraryPlatforms, setLibraryPlatforms] = useState<LibraryPlatform[]>([]); // ДОДАНО: Стан для платформ
   const [sortBy, setSortBy] = useState<SortOption>('relevance');
-  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
+  const [selectedPlatforms, _] = useState<string[]>([]);
 
   const currentPage = parseInt(searchParams.get('page') || '1', 10);
   const setCurrentPage = (page: number) => {
@@ -92,9 +92,9 @@ function SearchedGames() {
   }, [canImportGames, query]);
 
   // ВИПРАВЛЕНО: Тепер беремо платформи не з ігор, а з завантаженого списку БД
-  const availablePlatforms = useMemo(() => {
-    return libraryPlatforms.map((p) => ({ id: p.id, name: p.name }));
-  }, [libraryPlatforms]);
+  // const availablePlatforms = useMemo(() => {
+  //   return libraryPlatforms.map((p) => ({ id: p.id, name: p.name }));
+  // }, [libraryPlatforms]);
 
   const filteredGames = useMemo(() => {
     const normalizedQuery = query.toLowerCase();
@@ -170,13 +170,13 @@ function SearchedGames() {
     return Array.from({ length: Math.max(0, end - start + 1) }, (_, i) => start + i);
   }, [currentPage, totalPages]);
 
-  const togglePlatformFilter = (platformId: string) => {
-    setSelectedPlatforms((current) =>
-      current.includes(platformId)
-        ? current.filter((id) => id !== platformId)
-        : [...current, platformId]
-    );
-  };
+  // const togglePlatformFilter = (platformId: string) => {
+  //   setSelectedPlatforms((current) =>
+  //     current.includes(platformId)
+  //       ? current.filter((id) => id !== platformId)
+  //       : [...current, platformId]
+  //   );
+  // };
 
   const handleImportGame = async (candidate: IgdbImportCandidate) => {
     if (!user) {
@@ -336,7 +336,7 @@ function SearchedGames() {
           ) : null}
         </div>
 
-        <aside className="catalog-filters" aria-label="Search filters">
+        {/* <aside className="catalog-filters" aria-label="Search filters">
           <h3>Filters</h3>
           <div className="catalog-filter-section">
             <p>Platform</p>
@@ -357,7 +357,7 @@ function SearchedGames() {
               <p className="empty-state">No platform data.</p>
             )}
           </div>
-        </aside>
+        </aside> */}
       </div>
     </section>
   );

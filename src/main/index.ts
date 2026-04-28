@@ -9,8 +9,19 @@ import icon from '../../resources/icon.png?asset';
 import { PrismaClient } from '../generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
-import bcrypt from 'bcrypt';
 import { initializeSupabaseIntegration, startSupabaseLaunchListener } from './supabaseIntegration';
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = process.env["VITE_SUPABASE_URL"] as string;
+const supabaseAnonKey = process.env["VITE_SUPABASE_ANON_KEY"] as string;
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error(
+    'Missing Supabase environment variables. Check .env.local for VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY'
+  );
+}
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 type GameRecord = {
   id: number;
@@ -235,9 +246,9 @@ function scoreTitleMatch(source: string, candidate: string): number {
     const isSequel = /^(\d+|i{1,3}|iv|v|vi{0,3}|ix|x)$/.test(firstExtraWord);
 
     if (isSequel) {
-      return Math.max(baseScore, 0.4); 
+      return Math.max(baseScore, 0.4);
     } else {
-      return 0.9; 
+      return 0.9;
     }
   }
 
@@ -1577,13 +1588,14 @@ app.whenReady().then(async () => {
       label: entry.recordedAt
         ? new Date(entry.recordedAt).toLocaleDateString('en-US', {
             month: 'short',
-            year: 'numeric'
+            day: 'numeric' // Показуємо "Apr 24" замість "Apr 2026"
           })
         : 'Unknown',
       price: Number(entry.price)
     }));
 
-    const priceHistory = rawPricePoints.length > 8 ? rawPricePoints.slice(-8) : rawPricePoints;
+    // Віддаємо всі крапки, ліміт прибрано
+    const priceHistory = rawPricePoints;
     const prices = rawPricePoints.map((point) => point.price);
     const priceStats = prices.length
       ? {
@@ -1636,54 +1648,112 @@ app.whenReady().then(async () => {
     });
 
     if (canceled || filePaths.length === 0) return null;
-    return filePaths[0]; 
+    return filePaths[0];
   });
 
   ipcMain.handle('dialog:confirm', async (_, message: string) => {
     const { response } = await dialog.showMessageBox({
       type: 'warning',
       buttons: ['Remove', 'Cancel'],
-      defaultId: 1, 
+      defaultId: 1,
       title: 'Confirm Action',
       message: message
     });
-    return response === 0; 
+    return response === 0;
   });
 
+  ipcMain.handle('auth:reset-password', async (_, email: string) => {
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: 'https://game-alexandria.vercel.app/'
+      });
+      if (error) return { success: false, error: error.message };
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: "Помилка зв'язку з сервером" };
+    }
+  });
+
+  // 2. РЕЄСТРАЦІЯ (З використанням Supabase)
+  ipcMain.handle(
+    'auth:register',
+    async (_, payload: { email: string; password?: string; username: string }) => {
+      const { email, password, username } = payload;
+      try {
+        // Реєстрація в Supabase Auth
+        const { error: authError } = await supabase.auth.signUp({
+          email,
+          password: password || '' // пароль може бути порожнім, якщо реєстрація через провайдера, але тут потрібен
+        });
+
+        if (authError) return { success: false, error: authError.message };
+
+        // Синхронізація з локальною БД Prisma
+        const userRole = await prisma.role.findFirst({
+          where: { name: { equals: 'User', mode: 'insensitive' } }
+        });
+
+        const newUser = await prisma.user.upsert({
+          where: { email },
+          update: { roleId: userRole?.id },
+          create: {
+            email,
+            username: username || email.split('@')[0],
+            passwordHash: 'SUPABASE_AUTH',
+            roleId: userRole?.id || 1
+          },
+          include: {
+            role: { include: { permissions: { select: { action: true } } } }
+          }
+        });
+
+        activeRemoteUserEmail = newUser.email;
+        return {
+          success: true,
+          user: {
+            ...newUser,
+            role: { ...newUser.role, permissions: newUser.role?.permissions.map((p) => p.action) }
+          }
+        };
+      } catch (err) {
+        return { success: false, error: 'Помилка синхронізації профілю' };
+      }
+    }
+  );
+
+  // 3. ВХІД (З використанням Supabase)
   ipcMain.handle('auth:login', async (_, { email, password }) => {
     try {
+      // Вхід через Supabase Auth
+      const { error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password
+      });
+
+      if (authError) return { success: false, error: authError.message };
+
+      // Отримання даних користувача з нашої БД
       const user = await prisma.user.findUnique({
         where: { email },
         include: {
-          role: {
-            include: {
-              permissions: {
-                select: { action: true }
-              }
-            }
-          }
+          role: { include: { permissions: { select: { action: true } } } }
         }
       });
 
-      if (!user) return { success: false, error: 'User not found' };
+      if (!user) return { success: false, error: 'Профіль не знайдено в локальній БД' };
 
-      const isMatch = await bcrypt.compare(password, user.passwordHash);
-      if (!isMatch) return { success: false, error: 'Wrong password' };
-
-      const { passwordHash, ...safeUser } = user;
-      const normalizedUser = {
-        ...safeUser,
-        role: safeUser.role
-          ? {
-              ...safeUser.role,
-              permissions: safeUser.role.permissions.map((permission) => permission.action)
-            }
-          : undefined
-      };
       activeRemoteUserEmail = user.email;
-      return { success: true, user: normalizedUser };
+
+      return {
+        success: true,
+        user: {
+          ...user,
+          passwordHash: undefined, // прибираємо хеш для безпеки
+          role: { ...user.role, permissions: user.role?.permissions.map((p) => p.action) }
+        }
+      };
     } catch (err) {
-      return { success: false, error: 'Database error' };
+      return { success: false, error: 'Помилка авторизації' };
     }
   });
 

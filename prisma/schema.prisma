@@ -31,6 +31,7 @@ model Game {
   igdbId        Int?           @unique @map("igdb_id")
   isCustom      Boolean        @default(false) @map("is_custom")
   addedByUserId Int?           @map("added_by_user_id")
+  lastSync      DateTime?      @map("last_sync") @db.Timestamp(6)
   addedByUser   User?          @relation("UserAddedGames", fields: [addedByUserId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   gameSessions  GameSession[]
   priceHistory  PriceHistory[]
